@@ -4,10 +4,9 @@ const {
   DisconnectReason,
   fetchLatestBaileysVersion,
 } = require('@whiskeysockets/baileys');
+
 const axios = require('axios');
 const qrcode = require('qrcode-terminal');
-const fs = require('fs');
-const path = require('path');
 
 async function startSock() {
   const authFolder = './auth_info_baileys';
@@ -55,7 +54,7 @@ async function startSock() {
 
     if (!messageContent) return;
 
-    // ✅ Updated logic
+    // Group-specific logic
     const mentionedJids = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
     const quotedParticipant = msg.message?.extendedTextMessage?.contextInfo?.participant || '';
     const botId = sock.user.id;
@@ -63,49 +62,7 @@ async function startSock() {
     const isMentioned = mentionedJids.includes(botId);
     const isRepliedToBot = quotedParticipant === botId;
 
-    // 🛑 Only respond in group if bot is mentioned or quoted
     if (isGroup && !(isMentioned || isRepliedToBot)) return;
-
-    try {
-      const apiUrl = `https://kai-api-rsmn.onrender.com/chat?sessionId=${encodeURIComponent(senderId)}&query=${encodeURIComponent(messageContent)}`;
-      const response = await axios.get(apiUrl);
-      const reply = response.data?.message || '🤖 Kai has no reply.';
-      await sock.sendMessage(senderId, { text: reply }, { quoted: msg });
-    } catch (err) {
-      console.error('❌ API error:', err.message);
-      await sock.sendMessage(senderId, { text: '❌ Error talking to Kai server.' }, { quoted: msg });
-    }
-  });
-}
-
-startSock();      console.log('🔌 Disconnected. Reconnecting:', shouldReconnect);
-      if (shouldReconnect) startSock();
-    } else if (connection === 'open') {
-      console.log('✅ Connected to WhatsApp!');
-    }
-  });
-
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    const msg = messages[0];
-    if (!msg.message || msg.key.fromMe) return;
-
-    const senderId = msg.key.remoteJid;
-    const isGroup = senderId.endsWith('@g.us');
-
-    const messageContent =
-      msg.message?.conversation ||
-      msg.message?.extendedTextMessage?.text ||
-      msg.message?.imageMessage?.caption ||
-      '';
-
-    const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
-    const quoted = msg.message?.extendedTextMessage?.contextInfo?.participant;
-
-    const isMentioned = mentioned.includes(sock.user.id);
-    const isRepliedToBot = quoted === sock.user.id;
-
-    if (isGroup && !(isMentioned || isRepliedToBot)) return;
-    if (!messageContent) return;
 
     try {
       const apiUrl = `https://kai-api-rsmn.onrender.com/chat?sessionId=${encodeURIComponent(senderId)}&query=${encodeURIComponent(messageContent)}`;
