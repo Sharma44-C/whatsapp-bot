@@ -13,9 +13,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => res.send('✅ Kai WhatsApp Bot is running.'));
-app.listen(PORT, () => console.log(`🌍 Express server live on port ${PORT}`));
+app.listen(PORT, () => console.log(`🌍 Server running on port ${PORT}`));
 
-// 🧠 Memory-based message history per group
+// 🧠 Message memory (10 last per group)
 const groupHistory = {};
 
 async function startSock() {
@@ -49,14 +49,12 @@ async function startSock() {
     }
   });
 
-  // ✅ Message handler (inbox + group aware)
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const msg = messages[0];
     if (!msg.message || msg.key.fromMe) return;
 
     const senderId = msg.key.remoteJid;
     const isGroup = senderId.endsWith('@g.us');
-    const botId = sock.user.id;
 
     const messageContent =
       msg.message?.conversation ||
@@ -66,19 +64,7 @@ async function startSock() {
 
     if (!messageContent) return;
 
-    // ✅ In groups, only reply if mentioned or replied to
-    if (isGroup) {
-      const contextInfo = msg.message?.extendedTextMessage?.contextInfo || {};
-      const mentionedJids = contextInfo.mentionedJid || [];
-      const quotedMsgSender = contextInfo.participant || '';
-
-      const mentionedMe = mentionedJids.includes(botId);
-      const repliedToMe = quotedMsgSender === botId;
-
-      if (!mentionedMe && !repliedToMe) return;
-    }
-
-    // 🧠 Store last 10 messages per group
+    // ✅ Store last 10 messages per group
     if (isGroup) {
       if (!groupHistory[senderId]) groupHistory[senderId] = [];
       groupHistory[senderId].push({
@@ -90,22 +76,42 @@ async function startSock() {
       }
     }
 
-    // 💬 Special "what's going on" response
-    const lower = messageContent.toLowerCase();
-    if (isGroup && lower.includes("what's going on")) {
-      const history = groupHistory[senderId] || [];
-      if (history.length === 0) {
-        await sock.sendMessage(senderId, { text: '📝 Nothing has happened in this group yet.' }, { quoted: msg });
-      } else {
-        const summary = history
-          .map((item, i) => `${i + 1}. ${item.sender.split('@')[0]}: ${item.text}`)
-          .join('\n');
-        await sock.sendMessage(senderId, { text: `📜 Here’s what’s going on:\n\n${summary}` }, { quoted: msg });
+    // ✅ Group handling: only respond if msg starts with "kai"
+    if (isGroup) {
+      const lower = messageContent.trim().toLowerCase();
+      if (!lower.startsWith('kai')) return; // not a command
+
+      // Strip "kai" from start
+      const strippedMessage = messageContent.trim().slice(3).trim();
+
+      // 🧠 Special command: what's going on
+      if (strippedMessage.toLowerCase().includes("what's going on")) {
+        const history = groupHistory[senderId] || [];
+        if (history.length === 0) {
+          await sock.sendMessage(senderId, { text: '📝 Nothing has happened in this group yet.' }, { quoted: msg });
+        } else {
+          const summary = history
+            .map((item, i) => `${i + 1}. ${item.sender.split('@')[0]}: ${item.text}`)
+            .join('\n');
+          await sock.sendMessage(senderId, { text: `📜 Here's what's going on:\n\n${summary}` }, { quoted: msg });
+        }
+        return;
+      }
+
+      // 🔁 Call Kai API with stripped message
+      try {
+        const apiUrl = `https://kai-api-rsmn.onrender.com/chat?sessionId=${encodeURIComponent(senderId)}&query=${encodeURIComponent(strippedMessage)}`;
+        const response = await axios.get(apiUrl);
+        const reply = response.data?.message || '🤖 Kai has no reply.';
+        await sock.sendMessage(senderId, { text: reply }, { quoted: msg });
+      } catch (err) {
+        console.error('❌ API error:', err.message);
+        await sock.sendMessage(senderId, { text: '❌ Error talking to Kai server.' }, { quoted: msg });
       }
       return;
     }
 
-    // 🤖 Kai API call
+    // ✅ Inbox: respond to all messages as usual
     try {
       const apiUrl = `https://kai-api-rsmn.onrender.com/chat?sessionId=${encodeURIComponent(senderId)}&query=${encodeURIComponent(messageContent)}`;
       const response = await axios.get(apiUrl);
