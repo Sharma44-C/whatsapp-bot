@@ -7,6 +7,17 @@ const {
 
 const axios = require('axios');
 const qrcode = require('qrcode-terminal');
+const express = require('express');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// 🧠 Group message history storage
+const groupHistory = {};
+
+// Run Express server to keep Render app alive
+app.get('/', (req, res) => res.send('✅ Kai WhatsApp Bot is running.'));
+app.listen(PORT, () => console.log(`🌐 Server live at http://localhost:${PORT}`));
 
 async function startSock() {
   const authFolder = './auth_info_baileys';
@@ -54,7 +65,7 @@ async function startSock() {
 
     if (!messageContent) return;
 
-    // Group-specific logic
+    // 👤 Info
     const mentionedJids = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
     const quotedParticipant = msg.message?.extendedTextMessage?.contextInfo?.participant || '';
     const botId = sock.user.id;
@@ -62,8 +73,42 @@ async function startSock() {
     const isMentioned = mentionedJids.includes(botId);
     const isRepliedToBot = quotedParticipant === botId;
 
+    // 🧠 Store last 10 messages per group
+    if (isGroup) {
+      if (!groupHistory[senderId]) groupHistory[senderId] = [];
+
+      groupHistory[senderId].push({
+        sender: msg.key.participant || msg.key.remoteJid,
+        text: messageContent,
+      });
+
+      if (groupHistory[senderId].length > 10) {
+        groupHistory[senderId].shift(); // remove oldest
+      }
+    }
+
+    // 👂 Ignore if in group and not mentioned or replied
     if (isGroup && !(isMentioned || isRepliedToBot)) return;
 
+    // 🤔 Special command: "what's going on"
+    const lowerMsg = messageContent.toLowerCase();
+    if (isGroup && lowerMsg.includes("what's going on")) {
+      const history = groupHistory[senderId] || [];
+      if (history.length === 0) {
+        await sock.sendMessage(senderId, { text: '📝 Nothing has happened here yet.' }, { quoted: msg });
+        return;
+      }
+
+      const summary = history
+        .map((h, i) => `${i + 1}. ${h.sender.split('@')[0]}: ${h.text}`)
+        .join('\n');
+
+      const kaiStyleIntro = '🧠 Here’s what’s been going on recently:\n\n';
+      await sock.sendMessage(senderId, { text: kaiStyleIntro + summary }, { quoted: msg });
+      return;
+    }
+
+    // 🧠 Talk to Kai API
     try {
       const apiUrl = `https://kai-api-rsmn.onrender.com/chat?sessionId=${encodeURIComponent(senderId)}&query=${encodeURIComponent(messageContent)}`;
       const response = await axios.get(apiUrl);
