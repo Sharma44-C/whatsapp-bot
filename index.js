@@ -17,6 +17,8 @@ app.listen(PORT, () => console.log(`🌍 Server running on port ${PORT}`));
 
 // 🧠 Message memory: last 10 messages per group
 const groupHistory = {};
+// ⚙️ Group settings: ON/OFF state
+const groupSettings = {};
 
 async function startSock() {
   const authFolder = './auth_info_baileys';
@@ -65,6 +67,8 @@ async function startSock() {
 
     if (!messageContent) return;
 
+    const lower = messageContent.trim().toLowerCase();
+
     // 🧠 Store last 10 messages per group
     if (isGroup) {
       if (!groupHistory[chatId]) groupHistory[chatId] = [];
@@ -77,13 +81,30 @@ async function startSock() {
       }
     }
 
+    // ✅ Handle group logic
     if (isGroup) {
-      const lower = messageContent.trim().toLowerCase();
-      if (!lower.startsWith('kai')) return;
+      // Turn Kai ON
+      if (lower === 'kai on') {
+        groupSettings[chatId] = { active: true };
+        await sock.sendMessage(chatId, { text: '✅ Kai is now active in this group!' }, { quoted: msg });
+        return;
+      }
 
-      const strippedMessage = messageContent.trim().slice(3).trim();
+      // Turn Kai OFF
+      if (lower === 'kai off') {
+        groupSettings[chatId] = { active: false };
+        await sock.sendMessage(chatId, { text: '❌ Kai is now inactive in this group!' }, { quoted: msg });
+        return;
+      }
 
-      if (strippedMessage.toLowerCase().includes("what's going on")) {
+      // If Kai is OFF, ignore messages
+      if (!groupSettings[chatId]?.active) return;
+
+      // ✅ Always reply to any message when ON
+      const strippedMessage = lower.trim();
+
+      // Special command: "what's going on"
+      if (strippedMessage.includes("what's going on")) {
         const history = groupHistory[chatId] || [];
         if (history.length === 0) {
           await sock.sendMessage(chatId, { text: '📝 Nothing has happened in this group yet.' }, { quoted: msg });
@@ -96,7 +117,7 @@ async function startSock() {
         return;
       }
 
-      // 🔁 Send to API using senderId as sessionId
+      // Send to Kai API
       try {
         const apiUrl = `https://kai-api-rsmn.onrender.com/chat?sessionId=${encodeURIComponent(senderId)}&query=${encodeURIComponent(strippedMessage)}`;
         const response = await axios.get(apiUrl);
@@ -109,7 +130,7 @@ async function startSock() {
       return;
     }
 
-    // ✅ Inbox: always respond
+    // ✅ Direct Messages (Kai always active)
     try {
       const apiUrl = `https://kai-api-rsmn.onrender.com/chat?sessionId=${encodeURIComponent(senderId)}&query=${encodeURIComponent(messageContent)}`;
       const response = await axios.get(apiUrl);
