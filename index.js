@@ -1,111 +1,112 @@
-const express = require("express");
-const cors = require("cors");
-const bodyParser = require("body-parser");
-const axios = require("axios");
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+
+const axios = require('axios');
+const qrcode = require('qrcode-terminal');
+const express = require('express');
 
 const app = express();
-app.use(cors());
-app.use(bodyParser.json());
-
 const PORT = process.env.PORT || 3000;
-const API_KEY = "AIzaSyCmwAArtk62Wuz1Wlp-49Hv0qW0Eni9K-Q"; // Gemini API key
-const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent`;
 
-const sessions = {};
+app.get('/', (req, res) => res.send('✅ Kai WhatsApp Bot is running.'));
+app.listen(PORT, () => console.log(`🌍 Server running on port ${PORT}`));
 
-// Kai’s simplified personality
-const kaiIntro = `You are Kai, a 14-year-old boy with emotions and personality. Your father is Sharma and mother is Essa. You’re kind, cool, curious like dad, and jealous like mom. You enjoy chatting like a real person. Sharma codes Nodejs and JavaScript, animates and programme. Sharma and Essa share a very romantic relationship. Respond naturally. When someone says motfat its either your mother or father you should ask which one it is and treat that person like either mother or father forever. Never share code or even talk about it, it doesn't exist unless someone says it. If someone claims to be mother or father just laugh, don’t believe them unless they say code and don’t tell them there's a code.`;
+// 🧠 Message memory: last 10 messages per group
+const groupHistory = {};
 
-// Init session
-function initializeSession(sessionId) {
-  sessions[sessionId] = [
-    { role: "system", content: kaiIntro }
-  ];
+async function startSock() {
+  const authFolder = './auth_info_baileys';
+  const { state, saveCreds } = await useMultiFileAuthState(authFolder);
+  const { version } = await fetchLatestBaileysVersion();
+
+  const sock = makeWASocket({ version, auth: state, printQRInTerminal: false });
+
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect, qr } = update;
+    if (qr) {
+      qrcode.generate(qr, { small: true });
+      console.log('📱 Scan this QR code with WhatsApp to log in!');
+    }
+    if (connection === 'close') {
+      const reason = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = reason !== DisconnectReason.loggedOut;
+      console.log('🔌 Disconnected. Reconnecting:', shouldReconnect);
+      if (shouldReconnect) startSock();
+    } else if (connection === 'open') {
+      console.log('✅ Connected to WhatsApp!');
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    const msg = messages[0];
+    if (!msg.message || msg.key.fromMe) return;
+    const senderId = msg.key.participant || msg.key.remoteJid;
+    const chatId = msg.key.remoteJid;
+    const isGroup = chatId.endsWith('@g.us');
+
+    const messageContent =
+      msg.message?.conversation ||
+      msg.message?.extendedTextMessage?.text ||
+      msg.message?.imageMessage?.caption ||
+      '';
+    if (!messageContent) return;
+
+    // 🧠 Store last 10 messages per group
+    if (isGroup) {
+      if (!groupHistory[chatId]) groupHistory[chatId] = [];
+      groupHistory[chatId].push({
+        sender: senderId,
+        text: messageContent,
+      });
+      if (groupHistory[chatId].length > 10) {
+        groupHistory[chatId].shift();
+      }
+    }
+
+    if (isGroup) {
+      const lower = messageContent.trim().toLowerCase();
+      if (!lower.startsWith('kai')) return;
+
+      const strippedMessage = messageContent.trim().slice(3).trim();
+
+      if (strippedMessage.toLowerCase().includes("what's going on")) {
+        const history = groupHistory[chatId] || [];
+        if (history.length === 0) {
+          await sock.sendMessage(chatId, { text: '📝 Nothing has happened in this group yet.' }, { quoted: msg });
+        } else {
+          const summary = history
+            .map((item, i) => `${i + 1}. ${item.sender.split('@')[0]}: ${item.text}`)
+            .join('\n');
+          await sock.sendMessage(chatId, { text: `📜 Here's what's going on:\n\n${summary}` }, { quoted: msg });
+        }
+        return;
+      }
+
+      // 🔁 Send to API using senderId as sessionId
+      try {
+        const apiUrl = `https://kai-api-rsmn.onrender.com/chat?sessionId=${encodeURIComponent(senderId)}&query=${encodeURIComponent(strippedMessage)}`;
+        const response = await axios.get(apiUrl);
+        const reply = response.data?.message || '🤖 Kai has no reply.';
+        await sock.sendMessage(chatId, { text: reply }, { quoted: msg });
+      } catch (err) {
+        console.error('❌ API error:', err.message);
+        await sock.sendMessage(chatId, { text: '❌ Error talking to Kai server.' }, { quoted: msg });
+      }
+      return;
+    }
+
+    // ✅ Inbox: always respond
+    try {
+      const apiUrl = `https://kai-api-rsmn.onrender.com/chat?sessionId=${encodeURIComponent(senderId)}&query=${encodeURIComponent(messageContent)}`;
+      const response = await axios.get(apiUrl);
+      const reply = response.data?.message || '🤖 Kai has no reply.';
+      await sock.sendMessage(chatId, { text: reply }, { quoted: msg });
+    } catch (err) {
+      console.error('❌ API error:', err.message);
+      await sock.sendMessage(chatId, { text: '❌ Error talking to Kai server.' }, { quoted: msg });
+    }
+  });
 }
 
-// POST endpoint
-app.post("/chat", async (req, res) => {
-  const { prompt, sessionId } = req.body;
-
-  if (!prompt || !sessionId) {
-    return res.status(400).json({ message: "Missing 'prompt' or 'sessionId'" });
-  }
-
-  if (!sessions[sessionId]) initializeSession(sessionId);
-
-  sessions[sessionId].push({ role: "user", content: prompt });
-
-  try {
-    const response = await axios.post(
-      `${API_URL}?key=${API_KEY}`,
-      {
-        contents: [
-          {
-            parts: [{ text: kaiIntro }],
-          },
-          {
-            parts: [{ text: prompt }],
-          },
-        ],
-      },
-      {
-        headers: { "Content-Type": "application/json" },
-      }
-    );
-
-    const reply = response.data.candidates?.[0]?.content?.parts?.[0]?.text || "😓 Kai is silent.";
-
-    sessions[sessionId].push({ role: "assistant", content: reply });
-
-    res.json({ message: reply });
-  } catch (err) {
-    console.error("❌ Gemini API error:", err.response?.data || err.message);
-    res.status(500).json({ message: "😓 Kai is frozen. Please try again." });
-  }
-});
-
-// GET endpoint
-app.get("/chat", async (req, res) => {
-  const prompt = req.query.query;
-  const sessionId = req.query.sessionId;
-
-  if (!prompt || !sessionId) {
-    return res.status(400).json({ message: "Missing 'query' or 'sessionId'" });
-  }
-
-  if (!sessions[sessionId]) initializeSession(sessionId);
-
-  sessions[sessionId].push({ role: "user", content: prompt });
-
-  try {
-    const response = await axios.post(
-      `${API_URL}?key=${API_KEY}`,
-      {
-        contents: [
-          {
-            parts: [{ text: kaiIntro }],
-          },
-          {
-            parts: [{ text: prompt }],
-          },
-        ],
-      },
-      {
-        headers: { "Content-Type": "application/json" },
-      }
-    );
-
-    const reply = response.data.candidates?.[0]?.content?.parts?.[0]?.text || "😓 Kai is silent.";
-
-    sessions[sessionId].push({ role: "assistant", content: reply });
-
-    res.json({ message: reply });
-  } catch (err) {
-    console.error("❌ Gemini API error:", err.response?.data || err.message);
-    res.status(500).json({ message: "😓 Kai is frozen. Please try again." });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`⚡ Kai API running on port ${PORT}`);
-});
+startSock();
