@@ -6,7 +6,7 @@ const pino = require("pino")
 const PhoneNumber = require('awesome-phonenumber')
 const express = require('express')
 const { exec } = require('child_process')
-const qrcode = require('qrcode') // QR generation
+const qrcode = require('qrcode')
 const {
     default: makeWASocket,
     useMultiFileAuthState,
@@ -15,7 +15,7 @@ const {
     makeCacheableSignalKeyStore,
     Browsers,
     jidDecode
-} = require('baileys') // Official Baileys
+} = require('baileys')
 
 /** ---------------- BOT SETTINGS ---------------- */
 global.botname = "Kai Bot"
@@ -35,15 +35,13 @@ function saveMemory(data) { fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, n
 const PORT = process.env.PORT || 3000
 const app = express()
 
-let lastQR = null; // Store last QR code image
-
+let lastQR = null
 app.get('/', (_req, res) => res.send('WhatsApp Bot is running.'))
 app.get('/qr', (_req, res) => {
     if (!lastQR) return res.send('No QR generated yet.')
     res.type('png')
     res.send(Buffer.from(lastQR.split(',')[1], 'base64'))
 })
-
 app.listen(PORT, () => console.log(`Express server running on port ${PORT}`))
 
 /** ---------------- STORE ---------------- */
@@ -91,27 +89,21 @@ async function startBot() {
 
     store.bind(sock.ev)
 
-    /** ---------------- QR CODE HANDLING ---------------- */
+    /** ---------------- QR ---------------- */
     sock.ev.on('connection.update', async (update) => {
         const { connection, qr, lastDisconnect } = update
-
         if (qr) {
             lastQR = await qrcode.toDataURL(qr)
             console.log(chalk.green('QR code generated. Visit /qr to scan it.'))
         }
-
         if (connection === 'open') console.log('✅ Connected to WhatsApp!')
         if (connection === 'close') {
             const reason = lastDisconnect?.error?.output?.statusCode
-            if (reason === DisconnectReason.loggedOut) {
-                console.log('❌ Logged out. Removing session...')
-                fs.rmSync('./session', { recursive: true, force: true })
-            }
+            if (reason === DisconnectReason.loggedOut) fs.rmSync('./session', { recursive: true, force: true })
             console.log('🔄 Reconnecting...')
             setTimeout(startBot, 3000)
         }
     })
-
     sock.ev.on('creds.update', saveCreds)
 
     /** ---------------- JID HELPERS ---------------- */
@@ -141,7 +133,9 @@ async function startBot() {
 
         const chatId = m.key.remoteJid
         const isGroup = chatId.endsWith('@g.us')
-        const sender = m.key.participant || m.key.remoteJid // participant in group or inbox
+        // ✅ normalize sender ID (same key in memory inbox/group)
+        const sender = sock.decodeJid(m.key.participant || m.key.remoteJid)
+
         const text =
             m.message.conversation ||
             m.message.extendedTextMessage?.text ||
@@ -152,24 +146,19 @@ async function startBot() {
         let memory = loadMemory()
         if (!memory[sender]) memory[sender] = { global: { lastMessage: '', lastReply: '' }, groups: {} }
 
-        // 🔹 Set default group mode to OFF
+        // Set default group mode OFF
         if (isGroup && memory[sender].groups[chatId] === undefined) {
             memory[sender].groups[chatId] = false
             saveMemory(memory)
         }
 
-        /** ---------------- ADMIN COMMANDS ---------------- */
+        /** ---------------- ADMIN ---------------- */
         if (ADMIN_NUMBERS.includes(sender)) {
-            if (text.toLowerCase() === '/ping') {
-                await sock.sendMessage(chatId, { text: '🏓 Pong!' }, { quoted: m })
-                return
-            }
+            if (text.toLowerCase() === '/ping') { await sock.sendMessage(chatId, { text: '🏓 Pong!' }, { quoted: m }); return }
             if (text.toLowerCase().startsWith('/broadcast ')) {
                 const msg = text.slice(11)
                 const allChats = await sock.groupFetchAllParticipating()
-                for (const gid of Object.keys(allChats)) {
-                    await sock.sendMessage(gid, { text: `[Broadcast]\n${msg}` })
-                }
+                for (const gid of Object.keys(allChats)) await sock.sendMessage(gid, { text: `[Broadcast]\n${msg}` })
                 await sock.sendMessage(chatId, { text: '📢 Broadcast sent.' }, { quoted: m })
                 return
             }
@@ -181,33 +170,20 @@ async function startBot() {
             }
         }
 
-        /** ---------------- KAI GROUP COMMANDS ---------------- */
+        /** ---------------- KAI GROUP ---------------- */
         if (isGroup) {
-            if (text.toLowerCase() === 'kai on') {
-                memory[sender].groups[chatId] = true
-                saveMemory(memory)
-                await sock.sendMessage(chatId, { text: "✅ Kai activated for you in this group." }, { quoted: m })
-                return
-            }
-            if (text.toLowerCase() === 'kai off') {
-                memory[sender].groups[chatId] = false
-                saveMemory(memory)
-                await sock.sendMessage(chatId, { text: "❌ Kai deactivated for you in this group." }, { quoted: m })
-                return
-            }
+            if (text.toLowerCase() === 'kai on') { memory[sender].groups[chatId] = true; saveMemory(memory); await sock.sendMessage(chatId, { text: "✅ Kai activated for you in this group." }, { quoted: m }); return }
+            if (text.toLowerCase() === 'kai off') { memory[sender].groups[chatId] = false; saveMemory(memory); await sock.sendMessage(chatId, { text: "❌ Kai deactivated for you in this group." }, { quoted: m }); return }
             if (memory[sender].groups[chatId] === false) return
         }
 
-        /** ---------------- KAI API RESPONSE ---------------- */
+        /** ---------------- KAI RESPONSE ---------------- */
         if (text) {
             try {
                 const apiUrl = `https://kai-api-z744.onrender.com?prompt=${encodeURIComponent(text)}&personid=${encodeURIComponent(sender)}`
                 const res = await axios.get(apiUrl)
                 const reply = res.data.reply || "⚠️ No reply from API"
-
-                // Send reply in chat
                 await sock.sendMessage(chatId, { text: reply }, { quoted: m })
-
                 // Save globally for inbox & group
                 memory[sender].global.lastMessage = text
                 memory[sender].global.lastReply = reply
@@ -217,24 +193,19 @@ async function startBot() {
             }
         }
 
-        /** ---------------- GREETING REACTIONS ---------------- */
-        if (/^(hi|hello|hey)$/i.test(text)) {
-            await sock.sendMessage(chatId, { react: { text: "👋", key: m.key } })
-        }
+        /** ---------------- GREETING ---------------- */
+        if (/^(hi|hello|hey)$/i.test(text)) await sock.sendMessage(chatId, { react: { text: "👋", key: m.key } })
     })
 
-    /** ---------------- GROUP PARTICIPANT EVENTS ---------------- */
+    /** ---------------- GROUP PARTICIPANTS ---------------- */
     sock.ev.on('group-participants.update', async ({ id, participants, action }) => {
-        if (action === 'add') {
-            for (const p of participants) await sock.sendMessage(id, { text: `👋 Welcome <@${p.split('@')[0]}>!` }, { mentions: [p] })
-        }
-        if (action === 'remove') {
-            for (const p of participants) await sock.sendMessage(id, { text: `👋 Goodbye <@${p.split('@')[0]}>!` }, { mentions: [p] })
+        for (const p of participants) {
+            if (action === 'add') await sock.sendMessage(id, { text: `👋 Welcome <@${p.split('@')[0]}>!` }, { mentions: [p] })
+            if (action === 'remove') await sock.sendMessage(id, { text: `👋 Goodbye <@${p.split('@')[0]}>!` }, { mentions: [p] })
         }
     })
 
     return sock
 }
 
-/** ---------------- START BOT ---------------- */
 startBot().catch(err => console.error(err))
