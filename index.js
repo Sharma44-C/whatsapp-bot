@@ -1,21 +1,28 @@
-import express from 'express'
-import makeWASocket, { useSingleFileAuthState, fetchLatestBaileysVersion, DisconnectReason } from '@whiskeysockets/baileys'
-import fetch from 'node-fetch'
-import fs from 'fs-extra'
+const express = require('express')
+const {
+  default: makeWASocket,
+  useSingleFileAuthState,
+  fetchLatestBaileysVersion,
+  DisconnectReason,
+  makeCacheableSignalKeyStore,
+  Browsers
+} = require('@whiskeysockets/baileys')
+const fetch = require('node-fetch')
+const fs = require('fs-extra')
+const P = require('pino')
 
 const PORT = process.env.PORT || 3000
 const SESSION_FILE = './creds.json'
 const MEMORY_FILE = './memory.json'
-const ADMIN_NUMBERS = ['123456789@s.whatsapp.net']
+const ADMIN_NUMBERS = ['27639412189@s.whatsapp.net']
 
 if (!fs.existsSync(MEMORY_FILE)) fs.writeJsonSync(MEMORY_FILE, {})
 function loadMemory() { return fs.readJsonSync(MEMORY_FILE) }
 function saveMemory(data) { fs.writeJsonSync(MEMORY_FILE, data, { spaces: 2 }) }
 
 const app = express()
-app.get('/', (req, res) => res.send('WhatsApp Bot is running.'))
+app.get('/', (_req, res) => res.send('WhatsApp Bot is running.'))
 app.listen(PORT, () => console.log(`Express server running on port ${PORT}`))
-
 console.log(`Bot running on port ${PORT}`)
 
 async function startBot() {
@@ -23,15 +30,28 @@ async function startBot() {
   const { version } = await fetchLatestBaileysVersion()
   const sock = makeWASocket({
     version,
-    auth: state,
-    printQRInTerminal: false,
-    generateHighQualityLinkPreview: true
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(
+        state.keys,
+        P({ level: "fatal" }).child({ level: "fatal" })
+      )
+    },
+    printQRInTerminal: true,
+    browser: Browsers.linux('Chrome'),
+    markOnlineOnConnect: true,
+    defaultQueryTimeoutMs: 60000,
+    connectTimeoutMs: 60000,
+    retryRequestDelayMs: 5000,
+    maxRetries: 5,
+    logger: P({ level: "silent" })
   })
 
   sock.ev.on('creds.update', saveCreds)
 
   sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect } = update
+    const { connection, lastDisconnect, qr } = update
+    if (qr) console.log('Scan this QR with your WhatsApp:', qr)
     if (connection === 'open') console.log('✅ Connected to WhatsApp!')
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode
@@ -51,11 +71,17 @@ async function startBot() {
     const sender = m.key.participant || m.key.remoteJid
     const chatId = m.key.remoteJid
     const isGroup = chatId.endsWith('@g.us')
-    const text = m.message.conversation || m.message.extendedTextMessage?.text || m.message.imageMessage?.caption || m.message.videoMessage?.caption || ''
+    const text =
+      m.message.conversation ||
+      m.message.extendedTextMessage?.text ||
+      m.message.imageMessage?.caption ||
+      m.message.videoMessage?.caption ||
+      ''
 
     let memory = loadMemory()
     if (!memory[sender]) memory[sender] = { groups: {} }
 
+    // Admin Commands
     if (ADMIN_NUMBERS.includes(sender)) {
       if (text.toLowerCase() === '/ping') {
         await sock.sendMessage(chatId, { text: '🏓 Pong!' }, { quoted: m })
@@ -73,8 +99,28 @@ async function startBot() {
       if (text.toLowerCase().startsWith('/shell ')) {
         const exec = require('child_process').exec
         exec(text.slice(7), (err, stdout, stderr) => {
-          sock.sendMessage(chatId, { text: err ? String(err) : stdout || stderr || 'No output' }, { quoted: m })
+          sock.sendMessage(
+            chatId,
+            { text: err ? String(err) : stdout || stderr || 'No output' },
+            { quoted: m }
+          )
         })
+        return
+      }
+      if (text.toLowerCase() === '/boost') {
+        let before = process.memoryUsage()
+        if (global.gc) global.gc()
+        let after = process.memoryUsage()
+        await sock.sendMessage(
+          chatId,
+          {
+            text:
+              `🚀 Bot boosted!\n` +
+              `Memory (MB) before: RSS=${(before.rss / 1024 / 1024).toFixed(2)}, Heap=${(before.heapUsed / 1024 / 1024).toFixed(2)}\n` +
+              `Memory (MB) after: RSS=${(after.rss / 1024 / 1024).toFixed(2)}, Heap=${(after.heapUsed / 1024 / 1024).toFixed(2)}`
+          },
+          { quoted: m }
+        )
         return
       }
     }
@@ -136,4 +182,7 @@ async function startBot() {
   })
 }
 
-startBot()
+module.exports = { startBot }
+if (require.main === module) {
+  startBot()
+  }
