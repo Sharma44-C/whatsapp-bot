@@ -69,7 +69,7 @@ async function startBot() {
         version,
         logger: pino({ level: 'silent' }),
         printQRInTerminal: true,
-        browser: Browsers.linux('Chrome'),
+        browser: ["Ubuntu", "Chrome", "1.0.0"], // a plain array [name, version, release]
         auth: {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
