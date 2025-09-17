@@ -12,6 +12,8 @@
   "dependencies": {
     "@adiwajshing/baileys": "^5.0.0",
     "express": "^4.19.2",
+    "baileys": "latest"
+    "chalk": "^4.1.2"
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "^6.7.18",
     "awesome-phonenumber": "^5.9.0",
