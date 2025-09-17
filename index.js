@@ -1,5 +1,4 @@
 import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion } from '@whiskeysockets/baileys'
-import fetch from 'node-fetch'
 import fs from 'fs-extra'
 import express from 'express'
 
@@ -42,9 +41,9 @@ async function startBot() {
     if (connection === 'close') console.log('❌ Connection closed, restarting...')
   })
 
-  // Request pairing code
+  // Request pairing code if not registered
   if (!state.creds.registered) {
-    const phoneNumber = process.env.PHONE_NUMBER || '27612302989' // example: 27831234567
+    const phoneNumber = process.env.PHONE_NUMBER || 'YOUR_PHONE_NUMBER_HERE' // example: 27831234567
     const code = await sock.requestPairingCode(phoneNumber)
     console.log(`📲 Pair this device using code: ${code}`)
   }
