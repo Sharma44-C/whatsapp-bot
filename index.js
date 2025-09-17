@@ -150,7 +150,13 @@ async function startBot() {
             ''
 
         let memory = loadMemory()
-        if (!memory[sender]) memory[sender] = { groups: {} }
+        if (!memory[sender]) memory[sender] = { groups: {}, lastMessage: '', lastReply: '' }
+
+        // 🔹 Set default group mode to OFF
+        if (isGroup && memory[sender].groups[chatId] === undefined) {
+            memory[sender].groups[chatId] = false
+            saveMemory(memory)
+        }
 
         /** ---------------- ADMIN COMMANDS ---------------- */
         if (ADMIN_NUMBERS.includes(sender)) {
