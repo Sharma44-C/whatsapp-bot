@@ -139,9 +139,9 @@ async function startBot() {
         const m = messages[0]
         if (!m.message || m.key.fromMe) return
 
-        const sender = m.key.participant || m.key.remoteJid
         const chatId = m.key.remoteJid
         const isGroup = chatId.endsWith('@g.us')
+        const sender = m.key.participant || m.key.remoteJid // participant in group or inbox
         const text =
             m.message.conversation ||
             m.message.extendedTextMessage?.text ||
@@ -150,7 +150,7 @@ async function startBot() {
             ''
 
         let memory = loadMemory()
-        if (!memory[sender]) memory[sender] = { groups: {}, lastMessage: '', lastReply: '' }
+        if (!memory[sender]) memory[sender] = { global: { lastMessage: '', lastReply: '' }, groups: {} }
 
         // 🔹 Set default group mode to OFF
         if (isGroup && memory[sender].groups[chatId] === undefined) {
@@ -204,9 +204,13 @@ async function startBot() {
                 const apiUrl = `https://kai-api-z744.onrender.com?prompt=${encodeURIComponent(text)}&personid=${encodeURIComponent(sender)}`
                 const res = await axios.get(apiUrl)
                 const reply = res.data.reply || "⚠️ No reply from API"
+
+                // Send reply in chat
                 await sock.sendMessage(chatId, { text: reply }, { quoted: m })
-                memory[sender].lastMessage = text
-                memory[sender].lastReply = reply
+
+                // Save globally for inbox & group
+                memory[sender].global.lastMessage = text
+                memory[sender].global.lastReply = reply
                 saveMemory(memory)
             } catch (err) {
                 await sock.sendMessage(chatId, { text: "⚠️ Error fetching response from API." }, { quoted: m })
