@@ -13,7 +13,6 @@ const {
     DisconnectReason,
     fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
-    Browsers,
     jidDecode
 } = require('baileys')
 
@@ -34,8 +33,8 @@ function saveMemory(data) { fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, n
 /** ---------------- EXPRESS SERVER ---------------- */
 const PORT = process.env.PORT || 3000
 const app = express()
-
 let lastQR = null
+
 app.get('/', (_req, res) => res.send('WhatsApp Bot is running.'))
 app.get('/qr', (_req, res) => {
     if (!lastQR) return res.send('No QR generated yet.')
@@ -133,9 +132,7 @@ async function startBot() {
 
         const chatId = m.key.remoteJid
         const isGroup = chatId.endsWith('@g.us')
-        // ✅ normalize sender ID (same key in memory inbox/group)
         const sender = sock.decodeJid(m.key.participant || m.key.remoteJid)
-
         const text =
             m.message.conversation ||
             m.message.extendedTextMessage?.text ||
@@ -146,11 +143,8 @@ async function startBot() {
         let memory = loadMemory()
         if (!memory[sender]) memory[sender] = { global: { lastMessage: '', lastReply: '' }, groups: {} }
 
-        // Set default group mode OFF
-        if (isGroup && memory[sender].groups[chatId] === undefined) {
-            memory[sender].groups[chatId] = false
-            saveMemory(memory)
-        }
+        // Initialize group toggle only
+        if (isGroup && memory[sender].groups[chatId] === undefined) memory[sender].groups[chatId] = false
 
         /** ---------------- ADMIN ---------------- */
         if (ADMIN_NUMBERS.includes(sender)) {
@@ -174,6 +168,13 @@ async function startBot() {
         if (isGroup) {
             if (text.toLowerCase() === 'kai on') { memory[sender].groups[chatId] = true; saveMemory(memory); await sock.sendMessage(chatId, { text: "✅ Kai activated for you in this group." }, { quoted: m }); return }
             if (text.toLowerCase() === 'kai off') { memory[sender].groups[chatId] = false; saveMemory(memory); await sock.sendMessage(chatId, { text: "❌ Kai deactivated for you in this group." }, { quoted: m }); return }
+            
+            // If Kai is OFF but mentioned
+            if (memory[sender].groups[chatId] === false && text.toLowerCase().includes('kai')) {
+                await sock.sendMessage(chatId, { text: "⚠️ Kai is OFF for you. Turn him on using: Kai on" }, { quoted: m })
+                return
+            }
+
             if (memory[sender].groups[chatId] === false) return
         }
 
@@ -184,7 +185,7 @@ async function startBot() {
                 const res = await axios.get(apiUrl)
                 const reply = res.data.reply || "⚠️ No reply from API"
                 await sock.sendMessage(chatId, { text: reply }, { quoted: m })
-                // Save globally for inbox & group
+
                 memory[sender].global.lastMessage = text
                 memory[sender].global.lastReply = reply
                 saveMemory(memory)
