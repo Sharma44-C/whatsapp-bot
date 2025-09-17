@@ -1,45 +1,42 @@
 const express = require('express');
-const { default: makeWASocket, fetchLatestBaileysVersion, DisconnectReason, makeCacheableSignalKeyStore, Browsers } = require('@whiskeysockets/baileys');
-const fetch = require('node-fetch');
+const makeWASocket = require('@whiskeysockets/baileys').default;
+const {
+  fetchLatestBaileysVersion,
+  DisconnectReason,
+  makeCacheableSignalKeyStore
+} = require('@whiskeysockets/baileys');
 const fs = require('fs-extra');
 const P = require('pino');
-const { exec } = require('child_process');
+const fetch = require('node-fetch');
 
 const PORT = process.env.PORT || 3000;
-const SESSION_FILE = './creds.json'; // <--- your session file
+const SESSION_FILE = './creds.json'; // your auth file
 const MEMORY_FILE = './memory.json';
 const ADMIN_NUMBERS = ['27639412189@s.whatsapp.net'];
 
-// ---------------- Memory functions ----------------
+// Ensure memory file exists
 if (!fs.existsSync(MEMORY_FILE)) fs.writeJsonSync(MEMORY_FILE, {});
 function loadMemory() { return fs.readJsonSync(MEMORY_FILE); }
 function saveMemory(data) { fs.writeJsonSync(MEMORY_FILE, data, { spaces: 2 }); }
 
-// ---------------- Auth functions ----------------
+// Simple single-file auth handler
 async function loadAuthState() {
-  try {
-    if (fs.existsSync(SESSION_FILE)) {
-      return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf-8'));
-    }
-    return { creds: {}, keys: {} };
-  } catch (err) {
-    return { creds: {}, keys: {} };
-  }
+  if (!fs.existsSync(SESSION_FILE)) return { creds: {}, keys: {} };
+  return fs.readJsonSync(SESSION_FILE);
 }
 
 function saveAuthState(authState) {
-  fs.writeFileSync(SESSION_FILE, JSON.stringify(authState, null, 2));
+  fs.writeJsonSync(SESSION_FILE, authState, { spaces: 2 });
 }
 
-// ---------------- Express ----------------
+// Express setup
 const app = express();
 app.get('/', (_req, res) => res.send('WhatsApp Bot is running.'));
 app.listen(PORT, () => console.log(`Express server running on port ${PORT}`));
 console.log(`Bot running on port ${PORT}`);
 
-// ---------------- Bot ----------------
 async function startBot() {
-  const state = await loadAuthState();
+  let state = await loadAuthState();
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
@@ -49,7 +46,7 @@ async function startBot() {
       keys: makeCacheableSignalKeyStore(state.keys, P({ level: "fatal" }).child({ level: "fatal" }))
     },
     printQRInTerminal: true,
-    browser: Browsers.linux('Chrome'),
+    browser: ['Linux', 'Chrome', '1.0.0'], // fixed Browsers issue
     markOnlineOnConnect: true,
     defaultQueryTimeoutMs: 60000,
     connectTimeoutMs: 60000,
@@ -58,13 +55,13 @@ async function startBot() {
     logger: P({ level: "silent" })
   });
 
-  // Save auth updates
-  sock.ev.on('creds.update', (creds) => {
-    state.creds = creds;
+  // Save creds on update
+  sock.ev.on('creds.update', (updated) => {
+    state = { ...state, ...updated };
     saveAuthState(state);
   });
 
-  // Connection events
+  // Connection updates
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
     if (qr) console.log('Scan this QR with your WhatsApp:', qr);
@@ -73,14 +70,14 @@ async function startBot() {
       const reason = lastDisconnect?.error?.output?.statusCode;
       if (reason === DisconnectReason.loggedOut) {
         console.log('❌ Logged out. Removing session...');
-        if (fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
+        fs.removeSync(SESSION_FILE);
       }
       console.log('🔄 Disconnected. Restarting...');
       setTimeout(startBot, 3000);
     }
   });
 
-  // Messages & Kai API
+  // Messages handler
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const m = messages[0];
     if (!m.message || m.key.fromMe) return;
@@ -98,13 +95,12 @@ async function startBot() {
     let memory = loadMemory();
     if (!memory[sender]) memory[sender] = { groups: {} };
 
-    // ---------- Admin Commands ----------
+    // Admin commands
     if (ADMIN_NUMBERS.includes(sender)) {
       if (text.toLowerCase() === '/ping') {
         await sock.sendMessage(chatId, { text: '🏓 Pong!' }, { quoted: m });
         return;
       }
-
       if (text.toLowerCase().startsWith('/broadcast ')) {
         const msg = text.slice(11);
         const allChats = await sock.groupFetchAllParticipating();
@@ -114,33 +110,20 @@ async function startBot() {
         await sock.sendMessage(chatId, { text: '📢 Broadcast sent.' }, { quoted: m });
         return;
       }
-
       if (text.toLowerCase().startsWith('/shell ')) {
+        const exec = require('child_process').exec;
         exec(text.slice(7), (err, stdout, stderr) => {
-          sock.sendMessage(chatId, { text: err ? String(err) : stdout || stderr || 'No output' }, { quoted: m });
+          sock.sendMessage(
+            chatId,
+            { text: err ? String(err) : stdout || stderr || 'No output' },
+            { quoted: m }
+          );
         });
-        return;
-      }
-
-      if (text.toLowerCase() === '/boost') {
-        let before = process.memoryUsage();
-        if (global.gc) global.gc();
-        let after = process.memoryUsage();
-        await sock.sendMessage(
-          chatId,
-          {
-            text:
-              `🚀 Bot boosted!\n` +
-              `Memory (MB) before: RSS=${(before.rss / 1024 / 1024).toFixed(2)}, Heap=${(before.heapUsed / 1024 / 1024).toFixed(2)}\n` +
-              `Memory (MB) after: RSS=${(after.rss / 1024 / 1024).toFixed(2)}, Heap=${(after.heapUsed / 1024 / 1024).toFixed(2)}`
-          },
-          { quoted: m }
-        );
         return;
       }
     }
 
-    // ---------- Group Commands ----------
+    // Group-specific activation
     if (isGroup) {
       if (text.toLowerCase() === 'kai on') {
         memory[sender].groups[chatId] = true;
@@ -157,7 +140,7 @@ async function startBot() {
       if (memory[sender].groups[chatId] === false) return;
     }
 
-    // ---------- Kai API ----------
+    // API response
     if (text) {
       try {
         const apiUrl = `https://kai-api-z744.onrender.com?prompt=${encodeURIComponent(text)}&personid=${encodeURIComponent(sender)}`;
@@ -172,31 +155,28 @@ async function startBot() {
         await sock.sendMessage(chatId, { text: "⚠️ Error fetching response from API." }, { quoted: m });
       }
     }
+  });
 
-    // ---------- Auto React to greetings ----------
+  // Welcome / goodbye messages
+  sock.ev.on('group-participants.update', async ({ id, participants, action }) => {
+    for (const part of participants) {
+      if (action === 'add') await sock.sendMessage(id, { text: `👋 Welcome <@${part.split('@')[0]}>!` }, { mentions: [part] });
+      if (action === 'remove') await sock.sendMessage(id, { text: `👋 Goodbye <@${part.split('@')[0]}>!` }, { mentions: [part] });
+    }
+  });
+
+  // React to greetings
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    const m = messages[0];
+    if (!m.message || m.key.fromMe) return;
+    const chatId = m.key.remoteJid;
+    const text = m.message.conversation || m.message.extendedTextMessage?.text || '';
     if (/^(hi|hello|hey)$/i.test(text)) {
       await sock.sendMessage(chatId, { react: { text: "👋", key: m.key } });
     }
   });
-
-  // ---------- Group participants join/leave ----------
-  sock.ev.on('group-participants.update', async (update) => {
-    const { id, participants, action } = update;
-    if (action === 'add') {
-      for (const part of participants) {
-        await sock.sendMessage(id, { text: `👋 Welcome <@${part.split('@')[0]}>!` }, { mentions: [part] });
-      }
-    }
-    if (action === 'remove') {
-      for (const part of participants) {
-        await sock.sendMessage(id, { text: `👋 Goodbye <@${part.split('@')[0]}>!` }, { mentions: [part] });
-      }
-    }
-  });
 }
 
-if (require.main === module) {
-  startBot();
-}
+if (require.main === module) startBot();
 
 module.exports = { startBot };
