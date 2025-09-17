@@ -6,6 +6,7 @@ const pino = require("pino")
 const PhoneNumber = require('awesome-phonenumber')
 const express = require('express')
 const { exec } = require('child_process')
+const qrcode = require('qrcode') // QR generation
 const {
     default: makeWASocket,
     useMultiFileAuthState,
@@ -33,7 +34,16 @@ function saveMemory(data) { fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, n
 /** ---------------- EXPRESS SERVER ---------------- */
 const PORT = process.env.PORT || 3000
 const app = express()
+
+let lastQR = null; // Store last QR code image
+
 app.get('/', (_req, res) => res.send('WhatsApp Bot is running.'))
+app.get('/qr', (_req, res) => {
+    if (!lastQR) return res.send('No QR generated yet.')
+    res.type('png')
+    res.send(Buffer.from(lastQR.split(',')[1], 'base64'))
+})
+
 app.listen(PORT, () => console.log(`Express server running on port ${PORT}`))
 
 /** ---------------- STORE ---------------- */
@@ -68,7 +78,7 @@ async function startBot() {
     const sock = makeWASocket({
         version,
         logger: pino({ level: 'silent' }),
-        printQRInTerminal: false, // ✅ never print QR
+        printQRInTerminal: false,
         browser: ["Ubuntu", "Chrome", "1.0.0"],
         auth: {
             creds: state.creds,
@@ -81,28 +91,15 @@ async function startBot() {
 
     store.bind(sock.ev)
 
-    /** ---------------- AUTO PAIR BOT NUMBER ---------------- */
-    if (!state.creds.registered) {
-        const pn = new PhoneNumber(BOT_NUMBER)
-        if (!pn.isValid()) {
-            console.log(chalk.red('Bot number invalid. Exiting...'))
-            process.exit(1)
+    /** ---------------- QR CODE HANDLING ---------------- */
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, qr, lastDisconnect } = update
+
+        if (qr) {
+            lastQR = await qrcode.toDataURL(qr)
+            console.log(chalk.green('QR code generated. Visit /qr to scan it.'))
         }
 
-        setTimeout(async () => {
-            try {
-                let code = await sock.requestPairingCode(BOT_NUMBER)
-                code = code?.match(/.{1,4}/g)?.join("-") || code
-                console.log(chalk.bgGreen.black(`Your Pairing Code:`), code)
-                console.log(chalk.yellow(`Enter this code in WhatsApp > Settings > Linked Devices > Link a Device`))
-            } catch (err) {
-                console.error('Failed to get pairing code:', err)
-            }
-        }, 3000)
-    }
-
-    /** ---------------- CONNECTION HANDLING ---------------- */
-    sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
         if (connection === 'open') console.log('✅ Connected to WhatsApp!')
         if (connection === 'close') {
             const reason = lastDisconnect?.error?.output?.statusCode
