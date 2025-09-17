@@ -1,16 +1,16 @@
-const express = require('express');
-const makeWASocket = require('@whiskeysockets/baileys').default;
-const {
+import express from 'express';
+import makeWASocket, {
   fetchLatestBaileysVersion,
   DisconnectReason,
   makeCacheableSignalKeyStore
-} = require('@whiskeysockets/baileys');
-const fs = require('fs-extra');
-const P = require('pino');
-const fetch = require('node-fetch');
+} from '@whiskeysockets/baileys';
+import fs from 'fs-extra';
+import fetch from 'node-fetch';
+import P from 'pino';
+import { exec } from 'child_process';
 
 const PORT = process.env.PORT || 3000;
-const SESSION_FILE = './creds.json'; // your auth file
+const SESSION_FILE = './creds.json';
 const MEMORY_FILE = './memory.json';
 const ADMIN_NUMBERS = ['27639412189@s.whatsapp.net'];
 
@@ -19,52 +19,39 @@ if (!fs.existsSync(MEMORY_FILE)) fs.writeJsonSync(MEMORY_FILE, {});
 function loadMemory() { return fs.readJsonSync(MEMORY_FILE); }
 function saveMemory(data) { fs.writeJsonSync(MEMORY_FILE, data, { spaces: 2 }); }
 
-// Simple single-file auth handler
-async function loadAuthState() {
-  if (!fs.existsSync(SESSION_FILE)) return { creds: {}, keys: {} };
-  return fs.readJsonSync(SESSION_FILE);
-}
-
-function saveAuthState(authState) {
-  fs.writeJsonSync(SESSION_FILE, authState, { spaces: 2 });
-}
-
-// Express setup
+// Express server
 const app = express();
 app.get('/', (_req, res) => res.send('WhatsApp Bot is running.'));
 app.listen(PORT, () => console.log(`Express server running on port ${PORT}`));
 console.log(`Bot running on port ${PORT}`);
 
-async function startBot() {
-  let state = await loadAuthState();
-  const { version } = await fetchLatestBaileysVersion();
+// Load existing session or create empty
+let state = { creds: {}, keys: {} };
+if (fs.existsSync(SESSION_FILE)) state = fs.readJsonSync(SESSION_FILE);
 
+async function startBot() {
+  const { version } = await fetchLatestBaileysVersion();
+  
   const sock = makeWASocket({
     version,
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, P({ level: "fatal" }).child({ level: "fatal" }))
+      keys: makeCacheableSignalKeyStore(state.keys, P({ level: 'fatal' }))
     },
     printQRInTerminal: true,
-    browser: ['Linux', 'Chrome', '1.0.0'], // fixed Browsers issue
+    logger: P({ level: 'silent' }),
     markOnlineOnConnect: true,
-    defaultQueryTimeoutMs: 60000,
-    connectTimeoutMs: 60000,
-    retryRequestDelayMs: 5000,
-    maxRetries: 5,
-    logger: P({ level: "silent" })
   });
 
-  // Save creds on update
-  sock.ev.on('creds.update', (updated) => {
-    state = { ...state, ...updated };
-    saveAuthState(state);
+  // Save updated credentials
+  sock.ev.on('creds.update', () => {
+    fs.writeJsonSync(SESSION_FILE, state, { spaces: 2 });
   });
 
   // Connection updates
-  sock.ev.on('connection.update', async (update) => {
+  sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
-    if (qr) console.log('Scan this QR with your WhatsApp:', qr);
+    if (qr) console.log('Scan this QR to login:', qr);
     if (connection === 'open') console.log('✅ Connected to WhatsApp!');
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode;
@@ -85,12 +72,11 @@ async function startBot() {
     const sender = m.key.participant || m.key.remoteJid;
     const chatId = m.key.remoteJid;
     const isGroup = chatId.endsWith('@g.us');
-    const text =
-      m.message.conversation ||
-      m.message.extendedTextMessage?.text ||
-      m.message.imageMessage?.caption ||
-      m.message.videoMessage?.caption ||
-      '';
+    const text = m.message.conversation
+      || m.message.extendedTextMessage?.text
+      || m.message.imageMessage?.caption
+      || m.message.videoMessage?.caption
+      || '';
 
     let memory = loadMemory();
     if (!memory[sender]) memory[sender] = { groups: {} };
@@ -111,7 +97,6 @@ async function startBot() {
         return;
       }
       if (text.toLowerCase().startsWith('/shell ')) {
-        const exec = require('child_process').exec;
         exec(text.slice(7), (err, stdout, stderr) => {
           sock.sendMessage(
             chatId,
@@ -121,9 +106,21 @@ async function startBot() {
         });
         return;
       }
+      if (text.toLowerCase() === '/boost') {
+        let before = process.memoryUsage();
+        if (global.gc) global.gc();
+        let after = process.memoryUsage();
+        await sock.sendMessage(chatId, {
+          text:
+            `🚀 Bot boosted!\n` +
+            `Memory (MB) before: RSS=${(before.rss/1024/1024).toFixed(2)}, Heap=${(before.heapUsed/1024/1024).toFixed(2)}\n` +
+            `Memory (MB) after: RSS=${(after.rss/1024/1024).toFixed(2)}, Heap=${(after.heapUsed/1024/1024).toFixed(2)}`
+        }, { quoted: m });
+        return;
+      }
     }
 
-    // Group-specific activation
+    // Group Kai toggle
     if (isGroup) {
       if (text.toLowerCase() === 'kai on') {
         memory[sender].groups[chatId] = true;
@@ -140,7 +137,7 @@ async function startBot() {
       if (memory[sender].groups[chatId] === false) return;
     }
 
-    // API response
+    // Kai API reply
     if (text) {
       try {
         const apiUrl = `https://kai-api-z744.onrender.com?prompt=${encodeURIComponent(text)}&personid=${encodeURIComponent(sender)}`;
@@ -157,7 +154,7 @@ async function startBot() {
     }
   });
 
-  // Welcome / goodbye messages
+  // Group participants welcome/goodbye
   sock.ev.on('group-participants.update', async ({ id, participants, action }) => {
     for (const part of participants) {
       if (action === 'add') await sock.sendMessage(id, { text: `👋 Welcome <@${part.split('@')[0]}>!` }, { mentions: [part] });
@@ -165,18 +162,15 @@ async function startBot() {
     }
   });
 
-  // React to greetings
+  // Simple reacts
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const m = messages[0];
     if (!m.message || m.key.fromMe) return;
     const chatId = m.key.remoteJid;
     const text = m.message.conversation || m.message.extendedTextMessage?.text || '';
-    if (/^(hi|hello|hey)$/i.test(text)) {
-      await sock.sendMessage(chatId, { react: { text: "👋", key: m.key } });
-    }
+    if (/^(hi|hello|hey)$/i.test(text)) await sock.sendMessage(chatId, { react: { text: "👋", key: m.key } });
   });
 }
 
-if (require.main === module) startBot();
-
-module.exports = { startBot };
+// Start bot
+startBot();
