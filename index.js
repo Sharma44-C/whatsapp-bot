@@ -14,17 +14,14 @@ const {
     makeCacheableSignalKeyStore,
     Browsers,
     jidDecode
-} = require("@whiskeysockets/baileys")
+} = require('baileys') // Official Baileys
 
 /** ---------------- BOT SETTINGS ---------------- */
 global.botname = "Kai Bot"
 global.themeemoji = "•"
 
-// Hardcoded owner & bot numbers (with @s.whatsapp.net)
-const OWNER_NUMBER = "27639412189@s.whatsapp.net"  // Replace with your owner number
-const BOT_NUMBER = "+27639412189"    // Replace with the bot number
-
-// Admin numbers
+const OWNER_NUMBER = "27639412189@s.whatsapp.net"
+const BOT_NUMBER = "+27612302989"
 const ADMIN_NUMBERS = [OWNER_NUMBER]
 
 /** ---------------- MEMORY ---------------- */
@@ -64,15 +61,15 @@ const store = {
 
 /** ---------------- START BOT ---------------- */
 async function startBot() {
-    let { version } = await fetchLatestBaileysVersion()
+    const { version } = await fetchLatestBaileysVersion()
     const { state, saveCreds } = await useMultiFileAuthState(`./session`)
     const msgRetryCounterCache = new NodeCache()
 
     const sock = makeWASocket({
         version,
         logger: pino({ level: 'silent' }),
-        printQRInTerminal: false,
-        browser: ["Ubuntu", "Chrome", "1.0.0"], // a plain array [name, version, release]
+        printQRInTerminal: true,
+        browser: Browsers.linux('Chrome'),
         auth: {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
@@ -125,7 +122,7 @@ async function startBot() {
     sock.decodeJid = (jid) => {
         if (!jid) return jid
         if (/:\d+@/gi.test(jid)) {
-            let decode = jidDecode(jid) || {}
+            const decode = jidDecode(jid) || {}
             return decode.user && decode.server ? decode.user + '@' + decode.server : jid
         }
         return jid
