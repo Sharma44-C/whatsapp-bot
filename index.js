@@ -3,9 +3,10 @@ const baileys = require('@whiskeysockets/baileys');
 const fetch = require('node-fetch');
 const fs = require('fs-extra');
 const P = require('pino');
+const { exec } = require('child_process');
 
 const makeWASocket = baileys.default;
-const { fetchLatestBaileysVersion, DisconnectReason, makeCacheableSignalKeyStore } = baileys;
+const { DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } = baileys;
 
 const PORT = process.env.PORT || 3000;
 const SESSION_FILE = './creds.json';
@@ -16,55 +17,45 @@ if (!fs.existsSync(MEMORY_FILE)) fs.writeJsonSync(MEMORY_FILE, {});
 function loadMemory() { return fs.readJsonSync(MEMORY_FILE); }
 function saveMemory(data) { fs.writeJsonSync(MEMORY_FILE, data, { spaces: 2 }); }
 
+// Load your creds file
+function loadAuth() {
+  if (fs.existsSync(SESSION_FILE)) {
+    const raw = fs.readFileSync(SESSION_FILE, 'utf-8');
+    const authState = JSON.parse(raw);
+    return {
+      creds: authState.creds,
+      keys: makeCacheableSignalKeyStore(authState.keys, P({ level: 'fatal' }))
+    };
+  } else {
+    console.error('❌ creds.json not found! You need a valid session.');
+    process.exit(1);
+  }
+}
+
 const app = express();
 app.get('/', (_req, res) => res.send('WhatsApp Bot is running.'));
 app.listen(PORT, () => console.log(`Express server running on port ${PORT}`));
 
-console.log(`Bot running on port ${PORT}`);
-
-async function loadAuthState() {
-  try {
-    if (!fs.existsSync(SESSION_FILE)) return { creds: {}, keys: {} };
-    const authData = fs.readJsonSync(SESSION_FILE);
-    return authData;
-  } catch (e) {
-    return { creds: {}, keys: {} };
-  }
-}
-
-function saveAuthState(state) {
-  fs.writeJsonSync(SESSION_FILE, state, { spaces: 2 });
-}
-
 async function startBot() {
-  const state = await loadAuthState();
-
+  const auth = loadAuth();
   const { version } = await fetchLatestBaileysVersion();
+
   const sock = makeWASocket({
     version,
-    auth: {
-      creds: state.creds || {},
-      keys: makeCacheableSignalKeyStore(
-        state.keys || {},
-        P({ level: "fatal" }).child({ level: "fatal" })
-      ),
-    },
-    printQRInTerminal: true,
+    auth,
+    printQRInTerminal: false, // No QR scanning
     markOnlineOnConnect: true,
-    defaultQueryTimeoutMs: 60000,
-    connectTimeoutMs: 60000,
-    retryRequestDelayMs: 5000,
-    maxRetries: 5,
-    logger: P({ level: "silent" })
+    logger: P({ level: 'silent' }),
   });
 
-  // Save creds on update
-  sock.ev.on('creds.update', (newState) => saveAuthState({ creds: newState.creds, keys: newState.keys }));
+  // Update creds.json if keys change
+  sock.ev.on('creds.update', () => {
+    fs.writeFileSync(SESSION_FILE, JSON.stringify({ creds: auth.creds, keys: auth.keys }, null, 2));
+  });
 
-  // Connection updates
+  // Connection events
   sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    if (qr) console.log('Scan this QR with your WhatsApp:', qr);
+    const { connection, lastDisconnect } = update;
     if (connection === 'open') console.log('✅ Connected to WhatsApp!');
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode;
@@ -77,6 +68,7 @@ async function startBot() {
     }
   });
 
+  // Message events
   sock.ev.on('messages.upsert', async ({ messages }) => {
     const m = messages[0];
     if (!m.message || m.key.fromMe) return;
@@ -94,43 +86,21 @@ async function startBot() {
     let memory = loadMemory();
     if (!memory[sender]) memory[sender] = { groups: {} };
 
-    // Admin Commands
+    // Admin commands
     if (ADMIN_NUMBERS.includes(sender)) {
       if (text.toLowerCase() === '/ping') {
         await sock.sendMessage(chatId, { text: '🏓 Pong!' }, { quoted: m });
         return;
       }
-      if (text.toLowerCase().startsWith('/broadcast ')) {
-        const msg = text.slice(11);
-        const allChats = await sock.groupFetchAllParticipating();
-        for (const gid of Object.keys(allChats)) {
-          await sock.sendMessage(gid, { text: `[Broadcast]\n${msg}` });
-        }
-        await sock.sendMessage(chatId, { text: '📢 Broadcast sent.' }, { quoted: m });
-        return;
-      }
       if (text.toLowerCase().startsWith('/shell ')) {
-        const exec = require('child_process').exec;
         exec(text.slice(7), (err, stdout, stderr) => {
           sock.sendMessage(chatId, { text: err ? String(err) : stdout || stderr || 'No output' }, { quoted: m });
         });
         return;
       }
-      if (text.toLowerCase() === '/boost') {
-        let before = process.memoryUsage();
-        if (global.gc) global.gc();
-        let after = process.memoryUsage();
-        await sock.sendMessage(chatId, {
-          text:
-            `🚀 Bot boosted!\n` +
-            `Memory (MB) before: RSS=${(before.rss / 1024 / 1024).toFixed(2)}, Heap=${(before.heapUsed / 1024 / 1024).toFixed(2)}\n` +
-            `Memory (MB) after: RSS=${(after.rss / 1024 / 1024).toFixed(2)}, Heap=${(after.heapUsed / 1024 / 1024).toFixed(2)}`
-        }, { quoted: m });
-        return;
-      }
     }
 
-    // Group toggle
+    // Group activation
     if (isGroup) {
       if (text.toLowerCase() === 'kai on') {
         memory[sender].groups[chatId] = true;
@@ -147,7 +117,7 @@ async function startBot() {
       if (memory[sender].groups[chatId] === false) return;
     }
 
-    // API reply
+    // Kai AI API
     if (text) {
       try {
         const apiUrl = `https://kai-api-z744.onrender.com?prompt=${encodeURIComponent(text)}&personid=${encodeURIComponent(sender)}`;
@@ -163,36 +133,6 @@ async function startBot() {
       }
     }
   });
-
-  // Welcome & goodbye messages
-  sock.ev.on('group-participants.update', async (update) => {
-    const { id, participants, action } = update;
-    if (action === 'add') {
-      for (const part of participants) {
-        await sock.sendMessage(id, { text: `👋 Welcome <@${part.split('@')[0]}>!` }, { mentions: [part] });
-      }
-    }
-    if (action === 'remove') {
-      for (const part of participants) {
-        await sock.sendMessage(id, { text: `👋 Goodbye <@${part.split('@')[0]}>!` }, { mentions: [part] });
-      }
-    }
-  });
-
-  // React to greetings
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    const m = messages[0];
-    if (!m.message || m.key.fromMe) return;
-    const chatId = m.key.remoteJid;
-    const text = m.message.conversation || m.message.extendedTextMessage?.text || '';
-    if (/^(hi|hello|hey)$/i.test(text)) {
-      await sock.sendMessage(chatId, { react: { text: "👋", key: m.key } });
-    }
-  });
 }
 
-if (require.main === module) {
-  startBot();
-}
-
-module.exports = { startBot };
+startBot();
