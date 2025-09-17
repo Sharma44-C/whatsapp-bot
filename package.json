@@ -17,6 +17,7 @@
     "axios": "^1.11.0",
     "fs-extra" : "^11.2.0",
     "pino": "^9.7.0",
+    "node-fetch": "^3.3.2",
     "qrcode": "^1.5.1", 
     "qrcode-terminal": "^0.12.0"
   }
