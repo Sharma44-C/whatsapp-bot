@@ -1,194 +1,237 @@
-// Core Node.js modules
-const fs = require('fs-extra'); // file read/write and extra utilities
-const fetch = require('node-fetch'); // for API requests
-const express = require('express'); // for web server
-const P = require('pino'); // logging
-
-// Baileys WhatsApp library
+const fs = require('fs')
+const chalk = require('chalk')
+const axios = require('axios')
+const NodeCache = require("node-cache")
+const pino = require("pino")
+const PhoneNumber = require('awesome-phonenumber')
+const express = require('express')
+const { exec } = require('child_process')
 const {
-  default: makeWASocket,
-  fetchLatestBaileysVersion,
-  DisconnectReason,
-  makeCacheableSignalKeyStore
-} = require('@whiskeysockets/baileys');
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason,
+    fetchLatestBaileysVersion,
+    makeCacheableSignalKeyStore,
+    Browsers,
+    jidDecode
+} = require("@whiskeysockets/baileys")
 
-// Bot configuration
-const PORT = process.env.PORT || 3000;
-const SESSION_FILE = './creds.json'; // your uploaded creds.json
-const MEMORY_FILE = './memory.json'; // memory per user
-const ADMIN_NUMBERS = ['27639412189@s.whatsapp.net']; // your admin number(s)
+/** ---------------- BOT SETTINGS ---------------- */
+global.botname = "Kai Bot"
+global.themeemoji = "•"
 
-// Ensure memory file exists
-if (!fs.existsSync(MEMORY_FILE)) fs.writeJsonSync(MEMORY_FILE, {});
-function loadMemory() { return fs.readJsonSync(MEMORY_FILE); }
-function saveMemory(data) { fs.writeJsonSync(MEMORY_FILE, data, { spaces: 2 }); }
+// Hardcoded owner & bot numbers (with @s.whatsapp.net)
+const OWNER_NUMBER = "27639412189@s.whatsapp.net"  // Replace with your owner number
+const BOT_NUMBER = "27612302989@s.whatsapp.net"    // Replace with the bot number
 
-// Start Express server
-const app = express();
-app.get('/', (_req, res) => res.send('WhatsApp Bot is running.'));
-app.listen(PORT, () => console.log(`Express server running on port ${PORT}`));
+// Admin numbers
+const ADMIN_NUMBERS = [OWNER_NUMBER]
 
-// Main bot function
-async function startBot() {
-  // Load your Baileys credentials from creds.json
-  const stateData = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf-8'));
-  const state = {
-    creds: stateData.creds,
-    keys: makeCacheableSignalKeyStore(stateData.keys, P({ level: 'fatal' }).child({ level: 'fatal' }))
-  };
+/** ---------------- MEMORY ---------------- */
+const MEMORY_FILE = './memory.json'
+if (!fs.existsSync(MEMORY_FILE)) fs.writeFileSync(MEMORY_FILE, JSON.stringify({}))
+function loadMemory() { return JSON.parse(fs.readFileSync(MEMORY_FILE)) }
+function saveMemory(data) { fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, null, 2)) }
 
-  // Fetch the latest WhatsApp Web version
-  const { version } = await fetchLatestBaileysVersion();
+/** ---------------- EXPRESS SERVER ---------------- */
+const PORT = process.env.PORT || 3000
+const app = express()
+app.get('/', (_req, res) => res.send('WhatsApp Bot is running.'))
+app.listen(PORT, () => console.log(`Express server running on port ${PORT}`))
 
-  // Create the WhatsApp socket
-  const sock = makeWASocket({
-    version,
-    auth: state,
-    printQRInTerminal: false, // no QR needed
-    markOnlineOnConnect: true,
-    defaultQueryTimeoutMs: 60000,
-    connectTimeoutMs: 60000,
-    retryRequestDelayMs: 5000,
-    maxRetries: 5,
-    logger: P({ level: 'silent' })
-  });
-
-  // Save creds when updated
-  sock.ev.on('creds.update', (newCreds) => {
-    state.creds = newCreds;
-    fs.writeJsonSync(SESSION_FILE, state, { spaces: 2 });
-  });
-
-  // Handle connection updates
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect } = update;
-    if (connection === 'open') console.log('✅ Connected to WhatsApp!');
-    if (connection === 'close') {
-      const reason = lastDisconnect?.error?.output?.statusCode;
-      if (reason === DisconnectReason.loggedOut) {
-        console.log('❌ Logged out. Removing session...');
-        fs.removeSync(SESSION_FILE);
-      }
-      console.log('🔄 Disconnected. Restarting...');
-      setTimeout(startBot, 3000); // restart bot
-    }
-  });
-
-  // Handle incoming messages (DMs & groups)
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    const m = messages[0];
-    if (!m.message || m.key.fromMe) return; // ignore empty or self messages
-
-    const sender = m.key.participant || m.key.remoteJid; // sender ID
-    const chatId = m.key.remoteJid; // chat ID
-    const isGroup = chatId.endsWith('@g.us'); // check if group
-    const text =
-      m.message.conversation ||
-      m.message.extendedTextMessage?.text ||
-      m.message.imageMessage?.caption ||
-      m.message.videoMessage?.caption ||
-      '';
-
-    // Load memory for user
-    let memory = loadMemory();
-    if (!memory[sender]) memory[sender] = { groups: {} };
-
-    // ------------------- ADMIN COMMANDS -------------------
-    if (ADMIN_NUMBERS.includes(sender)) {
-      if (text.toLowerCase() === '/ping') {
-        await sock.sendMessage(chatId, { text: '🏓 Pong!' }, { quoted: m });
-        return;
-      }
-      if (text.toLowerCase().startsWith('/broadcast ')) {
-        const msg = text.slice(11);
-        const allChats = await sock.groupFetchAllParticipating();
-        for (const gid of Object.keys(allChats)) {
-          await sock.sendMessage(gid, { text: `[Broadcast]\n${msg}` });
-        }
-        await sock.sendMessage(chatId, { text: '📢 Broadcast sent.' }, { quoted: m });
-        return;
-      }
-      if (text.toLowerCase().startsWith('/shell ')) {
-        const exec = require('child_process').exec;
-        exec(text.slice(7), (err, stdout, stderr) => {
-          sock.sendMessage(
-            chatId,
-            { text: err ? String(err) : stdout || stderr || 'No output' },
-            { quoted: m }
-          );
-        });
-        return;
-      }
-      if (text.toLowerCase() === '/boost') {
-        let before = process.memoryUsage();
-        if (global.gc) global.gc();
-        let after = process.memoryUsage();
-        await sock.sendMessage(
-          chatId,
-          {
-            text:
-              `🚀 Bot boosted!\n` +
-              `Memory (MB) before: RSS=${(before.rss / 1024 / 1024).toFixed(2)}, Heap=${(before.heapUsed / 1024 / 1024).toFixed(2)}\n` +
-              `Memory (MB) after: RSS=${(after.rss / 1024 / 1024).toFixed(2)}, Heap=${(after.heapUsed / 1024 / 1024).toFixed(2)}`
-          },
-          { quoted: m }
-        );
-        return;
-      }
-    }
-
-    // ------------------- GROUP ACTIVATION -------------------
-    if (isGroup) {
-      if (text.toLowerCase() === 'kai on') {
-        memory[sender].groups[chatId] = true;
-        saveMemory(memory);
-        await sock.sendMessage(chatId, { text: "✅ Kai activated for you in this group." }, { quoted: m });
-        return;
-      }
-      if (text.toLowerCase() === 'kai off') {
-        memory[sender].groups[chatId] = false;
-        saveMemory(memory);
-        await sock.sendMessage(chatId, { text: "❌ Kai deactivated for you in this group." }, { quoted: m });
-        return;
-      }
-      if (memory[sender].groups[chatId] === false) return; // skip if deactivated
-    }
-
-    // ------------------- KAI REPLY SYSTEM -------------------
-    if (text) {
-      try {
-        const apiUrl = `https://kai-api-z744.onrender.com?prompt=${encodeURIComponent(text)}&personid=${encodeURIComponent(sender)}`;
-        const res = await fetch(apiUrl);
-        const json = await res.json();
-        const reply = json.reply || "⚠️ No reply from API";
-        await sock.sendMessage(chatId, { text: reply }, { quoted: m });
-        memory[sender].lastMessage = text;
-        memory[sender].lastReply = reply;
-        saveMemory(memory);
-      } catch (err) {
-        await sock.sendMessage(chatId, { text: "⚠️ Error fetching response from API." }, { quoted: m });
-      }
-    }
-  });
-
-  // ------------------- GROUP WELCOME / GOODBYE -------------------
-  sock.ev.on('group-participants.update', async (update) => {
-    const { id, participants, action } = update;
-    if (action === 'add') {
-      for (const part of participants) {
-        await sock.sendMessage(id, { text: `👋 Welcome <@${part.split('@')[0]}>!` }, { mentions: [part] });
-      }
-    }
-    if (action === 'remove') {
-      for (const part of participants) {
-        await sock.sendMessage(id, { text: `👋 Goodbye <@${part.split('@')[0]}>!` }, { mentions: [part] });
-      }
-    }
-  });
-
-  console.log('✅ Bot is fully running!');
-  return sock;
+/** ---------------- STORE ---------------- */
+const store = {
+    messages: {},
+    contacts: {},
+    chats: {},
+    groupMetadata: async (jid) => ({}),
+    bind(ev) {
+        ev.on('messages.upsert', ({ messages }) => {
+            messages.forEach(msg => {
+                if (msg.key?.remoteJid) {
+                    this.messages[msg.key.remoteJid] = this.messages[msg.key.remoteJid] || {}
+                    this.messages[msg.key.remoteJid][msg.key.id] = msg
+                }
+            })
+        })
+        ev.on('contacts.update', (contacts) => {
+            contacts.forEach(c => { if (c.id) this.contacts[c.id] = c })
+        })
+        ev.on('chats.set', (chats) => { this.chats = chats })
+    },
+    loadMessage(jid, id) { return this.messages[jid]?.[id] || null }
 }
 
-// Start the bot
-startBot();
+/** ---------------- START BOT ---------------- */
+async function startBot() {
+    let { version } = await fetchLatestBaileysVersion()
+    const { state, saveCreds } = await useMultiFileAuthState(`./session`)
+    const msgRetryCounterCache = new NodeCache()
+
+    const sock = makeWASocket({
+        version,
+        logger: pino({ level: 'silent' }),
+        printQRInTerminal: true,
+        browser: Browsers.linux('Chrome'),
+        auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
+        },
+        markOnlineOnConnect: true,
+        defaultQueryTimeoutMs: 60000,
+        msgRetryCounterCache
+    })
+
+    store.bind(sock.ev)
+
+    /** ---------------- AUTO PAIR BOT NUMBER ---------------- */
+    if (!state.creds.registered) {
+        const pn = new PhoneNumber(BOT_NUMBER.split('@')[0])
+        if (!pn.isValid()) {
+            console.log(chalk.red('Bot number invalid. Exiting...'))
+            process.exit(1)
+        }
+
+        setTimeout(async () => {
+            try {
+                let code = await sock.requestPairingCode(BOT_NUMBER.split('@')[0])
+                code = code?.match(/.{1,4}/g)?.join("-") || code
+                console.log(chalk.bgGreen.black(`Your Pairing Code:`), code)
+                console.log(chalk.yellow(`Enter this code in WhatsApp > Settings > Linked Devices > Link a Device`))
+            } catch (err) {
+                console.error('Failed to get pairing code:', err)
+            }
+        }, 3000)
+    }
+
+    /** ---------------- CONNECTION HANDLING ---------------- */
+    sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+        if (qr) console.log('Scan QR:', qr)
+        if (connection === 'open') console.log('✅ Connected to WhatsApp!')
+        if (connection === 'close') {
+            const reason = lastDisconnect?.error?.output?.statusCode
+            if (reason === DisconnectReason.loggedOut) {
+                console.log('❌ Logged out. Removing session...')
+                fs.rmSync('./session', { recursive: true, force: true })
+            }
+            console.log('🔄 Reconnecting...')
+            setTimeout(startBot, 3000)
+        }
+    })
+
+    sock.ev.on('creds.update', saveCreds)
+
+    /** ---------------- JID HELPERS ---------------- */
+    sock.decodeJid = (jid) => {
+        if (!jid) return jid
+        if (/:\d+@/gi.test(jid)) {
+            let decode = jidDecode(jid) || {}
+            return decode.user && decode.server ? decode.user + '@' + decode.server : jid
+        }
+        return jid
+    }
+
+    sock.getName = async (jid) => {
+        jid = sock.decodeJid(jid)
+        let v = store.contacts[jid] || {}
+        if (jid.endsWith('@g.us')) v = await store.groupMetadata(jid) || {}
+        return v.name || v.subject || PhoneNumber('+' + jid.replace('@s.whatsapp.net','')).getNumber('international')
+    }
+
+    sock.public = true
+    sock.serializeM = (m) => m
+
+    /** ---------------- MESSAGE HANDLER ---------------- */
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+        const m = messages[0]
+        if (!m.message || m.key.fromMe) return
+
+        const sender = m.key.participant || m.key.remoteJid
+        const chatId = m.key.remoteJid
+        const isGroup = chatId.endsWith('@g.us')
+        const text =
+            m.message.conversation ||
+            m.message.extendedTextMessage?.text ||
+            m.message.imageMessage?.caption ||
+            m.message.videoMessage?.caption ||
+            ''
+
+        let memory = loadMemory()
+        if (!memory[sender]) memory[sender] = { groups: {} }
+
+        /** ---------------- ADMIN COMMANDS ---------------- */
+        if (ADMIN_NUMBERS.includes(sender)) {
+            if (text.toLowerCase() === '/ping') {
+                await sock.sendMessage(chatId, { text: '🏓 Pong!' }, { quoted: m })
+                return
+            }
+            if (text.toLowerCase().startsWith('/broadcast ')) {
+                const msg = text.slice(11)
+                const allChats = await sock.groupFetchAllParticipating()
+                for (const gid of Object.keys(allChats)) {
+                    await sock.sendMessage(gid, { text: `[Broadcast]\n${msg}` })
+                }
+                await sock.sendMessage(chatId, { text: '📢 Broadcast sent.' }, { quoted: m })
+                return
+            }
+            if (text.toLowerCase().startsWith('/shell ')) {
+                exec(text.slice(7), (err, stdout, stderr) => {
+                    sock.sendMessage(chatId, { text: err ? String(err) : stdout || stderr || 'No output' }, { quoted: m })
+                })
+                return
+            }
+        }
+
+        /** ---------------- KAI GROUP COMMANDS ---------------- */
+        if (isGroup) {
+            if (text.toLowerCase() === 'kai on') {
+                memory[sender].groups[chatId] = true
+                saveMemory(memory)
+                await sock.sendMessage(chatId, { text: "✅ Kai activated for you in this group." }, { quoted: m })
+                return
+            }
+            if (text.toLowerCase() === 'kai off') {
+                memory[sender].groups[chatId] = false
+                saveMemory(memory)
+                await sock.sendMessage(chatId, { text: "❌ Kai deactivated for you in this group." }, { quoted: m })
+                return
+            }
+            if (memory[sender].groups[chatId] === false) return
+        }
+
+        /** ---------------- KAI API RESPONSE ---------------- */
+        if (text) {
+            try {
+                const apiUrl = `https://kai-api-z744.onrender.com?prompt=${encodeURIComponent(text)}&personid=${encodeURIComponent(sender)}`
+                const res = await axios.get(apiUrl)
+                const reply = res.data.reply || "⚠️ No reply from API"
+                await sock.sendMessage(chatId, { text: reply }, { quoted: m })
+                memory[sender].lastMessage = text
+                memory[sender].lastReply = reply
+                saveMemory(memory)
+            } catch (err) {
+                await sock.sendMessage(chatId, { text: "⚠️ Error fetching response from API." }, { quoted: m })
+            }
+        }
+
+        /** ---------------- GREETING REACTIONS ---------------- */
+        if (/^(hi|hello|hey)$/i.test(text)) {
+            await sock.sendMessage(chatId, { react: { text: "👋", key: m.key } })
+        }
+    })
+
+    /** ---------------- GROUP PARTICIPANT EVENTS ---------------- */
+    sock.ev.on('group-participants.update', async ({ id, participants, action }) => {
+        if (action === 'add') {
+            for (const p of participants) await sock.sendMessage(id, { text: `👋 Welcome <@${p.split('@')[0]}>!` }, { mentions: [p] })
+        }
+        if (action === 'remove') {
+            for (const p of participants) await sock.sendMessage(id, { text: `👋 Goodbye <@${p.split('@')[0]}>!` }, { mentions: [p] })
+        }
+    })
+
+    return sock
+}
+
+/** ---------------- START BOT ---------------- */
+startBot().catch(err => console.error(err))
