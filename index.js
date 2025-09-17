@@ -1,7 +1,14 @@
 import express from 'express'
-import makeWASocket, { useSingleFileAuthState, fetchLatestBaileysVersion, DisconnectReason } from '@whiskeysockets/baileys'
-import fetch from 'node-fetch'
 import fs from 'fs-extra'
+
+// Baileys import (CommonJS → ESM safe way)
+import baileysPkg from '@whiskeysockets/baileys'
+const {
+  default: makeWASocket,
+  useSingleFileAuthState,
+  fetchLatestBaileysVersion,
+  DisconnectReason
+} = baileysPkg
 
 const PORT = process.env.PORT || 3000
 const SESSION_FILE = './creds.json'
@@ -51,7 +58,12 @@ async function startBot() {
     const sender = m.key.participant || m.key.remoteJid
     const chatId = m.key.remoteJid
     const isGroup = chatId.endsWith('@g.us')
-    const text = m.message.conversation || m.message.extendedTextMessage?.text || m.message.imageMessage?.caption || m.message.videoMessage?.caption || ''
+    const text =
+      m.message.conversation ||
+      m.message.extendedTextMessage?.text ||
+      m.message.imageMessage?.caption ||
+      m.message.videoMessage?.caption ||
+      ''
 
     let memory = loadMemory()
     if (!memory[sender]) memory[sender] = { groups: {} }
@@ -71,9 +83,13 @@ async function startBot() {
         return
       }
       if (text.toLowerCase().startsWith('/shell ')) {
-        const exec = require('child_process').exec
+        const { exec } = await import('child_process')
         exec(text.slice(7), (err, stdout, stderr) => {
-          sock.sendMessage(chatId, { text: err ? String(err) : stdout || stderr || 'No output' }, { quoted: m })
+          sock.sendMessage(
+            chatId,
+            { text: err ? String(err) : stdout || stderr || 'No output' },
+            { quoted: m }
+          )
         })
         return
       }
@@ -98,7 +114,7 @@ async function startBot() {
     if (text) {
       try {
         const apiUrl = `https://kai-api-z744.onrender.com?prompt=${encodeURIComponent(text)}&personid=${encodeURIComponent(sender)}`
-        const res = await fetch(apiUrl)
+        const res = await fetch(apiUrl) // ✅ native fetch (Node.js 18+)
         const json = await res.json()
         const reply = json.reply || "⚠️ No reply from API"
         await sock.sendMessage(chatId, { text: reply }, { quoted: m })
