@@ -22,7 +22,7 @@ global.themeemoji = "•"
 
 // Hardcoded owner & bot numbers (with @s.whatsapp.net)
 const OWNER_NUMBER = "27639412189@s.whatsapp.net"  // Replace with your owner number
-const BOT_NUMBER = "27612302989@s.whatsapp.net"    // Replace with the bot number
+const BOT_NUMBER = "27612302989"    // Replace with the bot number
 
 // Admin numbers
 const ADMIN_NUMBERS = [OWNER_NUMBER]
@@ -86,7 +86,7 @@ async function startBot() {
 
     /** ---------------- AUTO PAIR BOT NUMBER ---------------- */
     if (!state.creds.registered) {
-        const pn = new PhoneNumber(BOT_NUMBER.split('@')[0])
+        const pn = new PhoneNumber(BOT_NUMBER)
         if (!pn.isValid()) {
             console.log(chalk.red('Bot number invalid. Exiting...'))
             process.exit(1)
@@ -94,7 +94,7 @@ async function startBot() {
 
         setTimeout(async () => {
             try {
-                let code = await sock.requestPairingCode(BOT_NUMBER.split('@')[0])
+                let code = await sock.requestPairingCode(BOT_NUMBER)
                 code = code?.match(/.{1,4}/g)?.join("-") || code
                 console.log(chalk.bgGreen.black(`Your Pairing Code:`), code)
                 console.log(chalk.yellow(`Enter this code in WhatsApp > Settings > Linked Devices > Link a Device`))
