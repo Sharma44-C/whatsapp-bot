@@ -22,7 +22,7 @@ global.themeemoji = "•"
 
 // Hardcoded owner & bot numbers (with @s.whatsapp.net)
 const OWNER_NUMBER = "27639412189@s.whatsapp.net"  // Replace with your owner number
-const BOT_NUMBER = "+27612302989"    // Replace with the bot number
+const BOT_NUMBER = "+27639412189"    // Replace with the bot number
 
 // Admin numbers
 const ADMIN_NUMBERS = [OWNER_NUMBER]
