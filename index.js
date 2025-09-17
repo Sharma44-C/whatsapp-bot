@@ -68,8 +68,8 @@ async function startBot() {
     const sock = makeWASocket({
         version,
         logger: pino({ level: 'silent' }),
-        printQRInTerminal: true,
-        browser: ["Ubuntu", "Chrome", "1.0.0"], // a plain array [name, version, release]
+        printQRInTerminal: false, // ✅ never print QR
+        browser: ["Ubuntu", "Chrome", "1.0.0"],
         auth: {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
@@ -102,8 +102,7 @@ async function startBot() {
     }
 
     /** ---------------- CONNECTION HANDLING ---------------- */
-    sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-        if (qr) console.log('Scan QR:', qr)
+    sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
         if (connection === 'open') console.log('✅ Connected to WhatsApp!')
         if (connection === 'close') {
             const reason = lastDisconnect?.error?.output?.statusCode
