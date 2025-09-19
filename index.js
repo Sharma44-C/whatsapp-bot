@@ -24,12 +24,6 @@ const OWNER_NUMBER = "27639412189@s.whatsapp.net"
 const BOT_NUMBER = "+27612302989"
 const ADMIN_NUMBERS = [OWNER_NUMBER]
 
-/** ---------------- MEMORY ---------------- */
-const MEMORY_FILE = './memory.json'
-if (!fs.existsSync(MEMORY_FILE)) fs.writeFileSync(MEMORY_FILE, JSON.stringify({}))
-function loadMemory() { return JSON.parse(fs.readFileSync(MEMORY_FILE)) }
-function saveMemory(data) { fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, null, 2)) }
-
 /** ---------------- EXPRESS SERVER ---------------- */
 const PORT = process.env.PORT || 3000
 const app = express()
@@ -119,7 +113,11 @@ async function startBot() {
         jid = sock.decodeJid(jid)
         let v = store.contacts[jid] || {}
         if (jid.endsWith('@g.us')) v = await store.groupMetadata(jid) || {}
-        return v.name || v.subject || PhoneNumber('+' + jid.replace('@s.whatsapp.net','')).getNumber('international')
+        try {
+            return v.name || v.subject || PhoneNumber('+' + jid.replace('@s.whatsapp.net','')).getNumber('international')
+        } catch {
+            return jid
+        }
     }
 
     sock.public = true
@@ -140,42 +138,32 @@ async function startBot() {
             m.message.videoMessage?.caption ||
             ''
 
-        let memory = loadMemory()
-        if (!memory[sender]) memory[sender] = { global: { lastMessage: '', lastReply: '' }, groups: {} }
-
-        // Initialize group toggle only
-        if (isGroup && memory[sender].groups[chatId] === undefined) memory[sender].groups[chatId] = false
-
         /** ---------------- ADMIN ---------------- */
-        if (ADMIN_NUMBERS.includes(sender)) {
-            if (text.toLowerCase() === '/ping') { await sock.sendMessage(chatId, { text: '🏓 Pong!' }, { quoted: m }); return }
+        const cleanSender = sender.split(':')[0] // normalize device suffix
+        if (ADMIN_NUMBERS.includes(cleanSender)) {
+            if (text.toLowerCase() === '/ping') {
+                await sock.sendMessage(chatId, { text: '🏓 Pong!' }, { quoted: m })
+                return
+            }
             if (text.toLowerCase().startsWith('/broadcast ')) {
-                const msg = text.slice(11)
-                const allChats = await sock.groupFetchAllParticipating()
-                for (const gid of Object.keys(allChats)) await sock.sendMessage(gid, { text: `[Broadcast]\n${msg}` })
-                await sock.sendMessage(chatId, { text: '📢 Broadcast sent.' }, { quoted: m })
+                try {
+                    const msg = text.slice(11)
+                    const allChats = await sock.groupFetchAllParticipating()
+                    for (const gid of Object.keys(allChats)) await sock.sendMessage(gid, { text: `[Broadcast]\n${msg}` })
+                    await sock.sendMessage(chatId, { text: '📢 Broadcast sent.' }, { quoted: m })
+                } catch {
+                    await sock.sendMessage(chatId, { text: '⚠️ Broadcast failed. No groups found.' }, { quoted: m })
+                }
                 return
             }
             if (text.toLowerCase().startsWith('/shell ')) {
-                exec(text.slice(7), (err, stdout, stderr) => {
-                    sock.sendMessage(chatId, { text: err ? String(err) : stdout || stderr || 'No output' }, { quoted: m })
+                const cmd = text.slice(7)
+                exec(cmd, { timeout: 5000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+                    const out = err ? String(err) : stdout || stderr || 'No output'
+                    sock.sendMessage(chatId, { text: out }, { quoted: m })
                 })
                 return
             }
-        }
-
-        /** ---------------- KAI GROUP ---------------- */
-        if (isGroup) {
-            if (text.toLowerCase() === 'kai on') { memory[sender].groups[chatId] = true; saveMemory(memory); await sock.sendMessage(chatId, { text: "✅ Kai activated for you in this group." }, { quoted: m }); return }
-            if (text.toLowerCase() === 'kai off') { memory[sender].groups[chatId] = false; saveMemory(memory); await sock.sendMessage(chatId, { text: "❌ Kai deactivated for you in this group." }, { quoted: m }); return }
-            
-            // If Kai is OFF but mentioned
-            if (memory[sender].groups[chatId] === false && text.toLowerCase().includes('kai')) {
-                await sock.sendMessage(chatId, { text: "⚠️ Kai is OFF for you. Turn him on using: Kai on" }, { quoted: m })
-                return
-            }
-
-            if (memory[sender].groups[chatId] === false) return
         }
 
         /** ---------------- KAI RESPONSE ---------------- */
@@ -185,24 +173,34 @@ async function startBot() {
                 const res = await axios.get(apiUrl)
                 const reply = res.data.reply || "⚠️ No reply from API"
                 await sock.sendMessage(chatId, { text: reply }, { quoted: m })
-
-                memory[sender].global.lastMessage = text
-                memory[sender].global.lastReply = reply
-                saveMemory(memory)
             } catch (err) {
                 await sock.sendMessage(chatId, { text: "⚠️ Error fetching response from API." }, { quoted: m })
             }
         }
 
         /** ---------------- GREETING ---------------- */
-        if (/^(hi|hello|hey)$/i.test(text)) await sock.sendMessage(chatId, { react: { text: "👋", key: m.key } })
+        if (/^(hi|hello|hey)$/i.test(text)) {
+            await sock.sendMessage(chatId, { react: { text: "👋", key: m.key } })
+        }
     })
 
     /** ---------------- GROUP PARTICIPANTS ---------------- */
     sock.ev.on('group-participants.update', async ({ id, participants, action }) => {
         for (const p of participants) {
-            if (action === 'add') await sock.sendMessage(id, { text: `👋 Welcome <@${p.split('@')[0]}>!` }, { mentions: [p] })
-            if (action === 'remove') await sock.sendMessage(id, { text: `👋 Goodbye <@${p.split('@')[0]}>!` }, { mentions: [p] })
+            const userJid = sock.decodeJid(p)
+            const number = userJid.split('@')[0]
+            if (action === 'add') {
+                await sock.sendMessage(id, {
+                    text: `👋 Welcome @${number}!`,
+                    mentions: [userJid]
+                })
+            }
+            if (action === 'remove') {
+                await sock.sendMessage(id, {
+                    text: `👋 Goodbye @${number}!`,
+                    mentions: [userJid]
+                })
+            }
         }
     })
 
